@@ -16,6 +16,20 @@ const User = require('./models/User');
 // Estados em memória
 const conversationStates = {};
 
+app.get('/webhook', (req, res) => {
+  const mode = req.query['hub.mode'];
+  const token = req.query['hub.verify_token'];
+  const challenge = req.query['hub.challenge'];
+
+  console.log('Webhook Challenge:', { mode, token, challenge }); // Para depuração
+
+  if (mode === 'subscribe' && token === 'meuTokenSecreto2025') {
+    res.status(200).send(challenge); // Retorna o desafio para validar
+  } else {
+    res.sendStatus(403); // Rejeita se o token não corresponder
+  }
+});
+
 // Webhook
 app.post('/webhook', async (req, res) => {
   const body = req.body;
