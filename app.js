@@ -35,12 +35,13 @@ app.post('/webhook', async (req, res) => {
   const body = req.body;
   if (!body || !body.entry) return res.sendStatus(200);
 
-  const event = body.entry[0].changes[0];
-  if (!event.value || !event.value.messages || !event.value.messages[0]) {
+  const entry = body.entry[0];
+  if (!entry.changes || !entry.changes[0] || !entry.changes[0].value || !entry.changes[0].value.messages || !entry.changes[0].value.messages[0]) {
     console.error('Payload inválido:', body);
-    return res.sendStatus(200); // Ignora mensagens malformadas
+    return res.sendStatus(200);
   }
 
+  const event = entry.changes[0];
   const from = event.value.messages[0].from;
   const text = event.value.messages[0].text.body;
   let responseText = '';
@@ -48,44 +49,57 @@ app.post('/webhook', async (req, res) => {
 
   if (!conversationStates[from]) conversationStates[from] = {};
 
+  // Nova regra: Início com "Olá" ou qualquer texto
   if (state === 'awaiting_name') {
-    conversationStates[from].proposedName = text.trim();
-    responseText = `Nome atualizado para "${text.trim()}". Confirme com "SIM" ou envie o correto.`;
+    let cleanedName = text.trim().replace(/[^a-zA-Z]/g, ''); // Remove caracteres especiais
+    cleanedName = cleanedName.charAt(0).toUpperCase() + cleanedName.slice(1).toLowerCase(); // Primeira maiúscula
+    conversationStates[from].proposedName = cleanedName || 'Usuário'; // Fallback se vazio
+    responseText = `Bem-vindo ao atendimento de IA! O nome que você escreveu é ${cleanedName}, correto? Digite SIM para confirmar, NAO para corrigir ou SAIR para encerrar o atendimento.`;
     conversationStates[from].state = 'confirming_name';
   } else if (state === 'confirming_name') {
     if (text.toUpperCase() === 'SIM') {
       await User.create({ phone: from, name: conversationStates[from].proposedName, acceptedTerms: false });
-      responseText = `Nome "${conversationStates[from].proposedName}" confirmado! Ao prosseguir, você aceita nossos termos de uso e autoriza mensagens futuras sobre [seu serviço]. Responda "ACEITO" para continuar ou "STOP" para cancelar.`;
+      responseText = `Link para política de privacidade: https://github.com/raphaelfnds/bot-whatsapp-privacidade/blob/main/PRIVACY.md\nVocê concorda com as políticas de privacidade? Digite SIM para confirmar, NAO para recusar e sair.`;
       conversationStates[from].state = 'confirming_terms';
-    } else {
-      conversationStates[from].proposedName = text.trim();
-      responseText = `Nome atualizado para "${text.trim()}". Confirme com "SIM" ou envie o correto.`;
-    }
-  } else if (state === 'confirming_terms') {
-    if (text.toUpperCase() === 'ACEITO') {
-      await User.findOneAndUpdate({ phone: from }, { acceptedTerms: true });
-      responseText = 'Obrigado por aceitar! Sobre o que quer falar? Responda: 1 - Tópico A, 2 - Tópico B, 0 - Falar com atendente.';
-      conversationStates[from].state = 'menu_selection';
-    } else if (text.toUpperCase() === 'STOP') {
-      await User.findOneAndUpdate({ phone: from }, { acceptedTerms: false });
-      responseText = 'Você cancelou o recebimento de mensagens futuras. Até logo!';
+    } else if (text.toUpperCase() === 'NAO') {
+      responseText = 'Por favor, escreva como gostaria de ser chamado.';
+      conversationStates[from].state = 'awaiting_name'; // Loop
+    } else if (text.toUpperCase() === 'SAIR') {
+      responseText = 'Agradecemos seu contato.';
       conversationStates[from].state = 'done';
     } else {
-      responseText = 'Responda "ACEITO" para continuar ou "STOP" para cancelar.';
+      responseText = 'Opção inválida. Digite SIM para confirmar, NAO para corrigir ou SAIR para encerrar.';
+    }
+  } else if (state === 'confirming_terms') {
+    if (text.toUpperCase() === 'SIM') {
+      await User.findOneAndUpdate({ phone: from }, { acceptedTerms: true });
+      responseText = 'Digite o número do item ao qual deseja falar:\n1. Agenda.\n2. Assunto X.\n3. Falar com atendente.\n4. Sair e encerrar o atendimento.';
+      conversationStates[from].state = 'menu_selection';
+    } else if (text.toUpperCase() === 'NAO') {
+      responseText = 'Agradecemos seu contato.';
+      conversationStates[from].state = 'done';
+    } else {
+      responseText = 'Responda SIM para confirmar ou NAO para recusar.';
     }
   } else if (state === 'menu_selection') {
     const option = text.trim();
+    let helpMore = '\nPodemos ajudar em mais alguma coisa? Digite SIM para voltar ao menu anterior ou SAIR para encerrar.';
     if (option === '1') {
-      responseText = 'Aqui está o link para Tópico A: https://link-a.com';
-      conversationStates[from].state = 'done';
+      responseText = 'Segue link para visualizar: https://calendar.google.com/calendar/u/0/r?pli=1' + helpMore;
     } else if (option === '2') {
-      responseText = 'Aqui está o link para Tópico B: https://link-b.com';
+      responseText = 'Segue link para visualizar: https://github.com/raphaelfnds?tab=repositories' + helpMore;
+    } else if (option === '3') {
+      responseText = 'Certo, por favor clique no link para ser encaminhado: https://wa.me/554288768668' + helpMore;
+    } else if (option === '4') {
+      responseText = 'Agradecemos seu contato.';
       conversationStates[from].state = 'done';
-    } else if (option === '0') {
-      responseText = 'Encaminhando para atendente. Aguarde.';
+    } else if (text.toUpperCase() === 'SIM') {
+      responseText = 'Digite o número do item ao qual deseja falar:\n1. Agenda.\n2. Assunto X.\n3. Falar com atendente.\n4. Sair e encerrar o atendimento.';
+    } else if (text.toUpperCase() === 'SAIR') {
+      responseText = 'Agradecemos seu contato.';
       conversationStates[from].state = 'done';
     } else {
-      responseText = 'Opção inválida. Responda: 1 - Tópico A, 2 - Tópico B, 0 - Falar com atendente.';
+      responseText = 'Opção inválida. Digite o número do item ou SIM/SAIR.';
     }
   }
 
@@ -109,13 +123,17 @@ app.post('/webhook', async (req, res) => {
       );
       console.log(`Mensagem enviada para ${from}: ${responseText}`);
     } catch (error) {
-      console.error('Erro ao enviar mensagem:', error.response ? error.response.data : error.message);
+      console.error('Erro ao enviar mensagem:', {
+        status: error.response?.status,
+        data: error.response?.data,
+        message: error.message
+      });
     }
   }
 
   console.log(`Resposta gerada para ${from}: ${responseText}`);
-  res.sendStatus(200); // Responde ao Meta que a requisição foi recebida
+  res.sendStatus(200);
 });
 
 // Iniciar servidor
-app.listen(process.env.PORT || 3000, () => console.log('Servidor rodando na porta', process.env.PORT || 3000));
+app.listen(process.env.PORT || 10000, () => console.log('Servidor rodando na porta', process.env.PORT || 10000));
