@@ -21,12 +21,12 @@ app.get('/webhook', (req, res) => {
   const token = req.query['hub.verify_token'];
   const challenge = req.query['hub.challenge'];
 
-  console.log('Webhook Challenge:', { mode, token, challenge }); // Para depuração
+  console.log('Webhook Challenge:', { mode, token, challenge });
 
   if (mode === 'subscribe' && token === 'meuTokenSecreto2025') {
-    res.status(200).send(challenge); // Retorna o desafio para validar
+    res.status(200).send(challenge);
   } else {
-    res.sendStatus(403); // Rejeita se o token não corresponder
+    res.sendStatus(403);
   }
 });
 
@@ -84,10 +84,33 @@ app.post('/webhook', async (req, res) => {
     }
   }
 
-  // Resposta simulada (substituir por envio real via API depois)
-  console.log(`Resposta para ${from}: ${responseText}`);
-  res.json({ status: 'ok', message: responseText }); // Envia resposta no corpo
+  // Enviar resposta via WhatsApp API
+  if (responseText) {
+    try {
+      await axios.post(
+        `https://graph.facebook.com/v22.0/748970534975341/messages`,
+        {
+          messaging_product: 'whatsapp',
+          to: from,
+          type: 'text',
+          text: { body: responseText }
+        },
+        {
+          headers: {
+            'Authorization': `Bearer ${process.env.ACCESS_TOKEN}`,
+            'Content-Type': 'application/json'
+          }
+        }
+      );
+      console.log(`Mensagem enviada para ${from}: ${responseText}`);
+    } catch (error) {
+      console.error('Erro ao enviar mensagem:', error.message);
+    }
+  }
+
+  console.log(`Resposta gerada para ${from}: ${responseText}`);
+  res.sendStatus(200); // Responde ao Meta que a requisição foi recebida
 });
 
-// Iniciar servidor local (para teste)
-app.listen(3000, () => console.log('Servidor rodando na porta 3000'));
+// Iniciar servidor
+app.listen(process.env.PORT || 3000, () => console.log('Servidor rodando na porta', process.env.PORT || 3000));
