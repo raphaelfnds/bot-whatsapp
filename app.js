@@ -36,7 +36,12 @@ app.post('/webhook', async (req, res) => {
   if (!body || !body.entry) return res.sendStatus(200);
 
   const event = body.entry[0].changes[0];
-  const from = event.value.messages[0].from; // Número do usuário
+  if (!event.value || !event.value.messages || !event.value.messages[0]) {
+    console.error('Payload inválido:', body);
+    return res.sendStatus(200); // Ignora mensagens malformadas
+  }
+
+  const from = event.value.messages[0].from;
   const text = event.value.messages[0].text.body;
   let responseText = '';
   let state = conversationStates[from]?.state || 'awaiting_name';
