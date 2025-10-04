@@ -104,7 +104,7 @@ app.post('/webhook', async (req, res) => {
       );
       console.log(`Mensagem enviada para ${from}: ${responseText}`);
     } catch (error) {
-      console.error('Erro ao enviar mensagem:', error.message);
+      console.error('Erro ao enviar mensagem:', error.response ? error.response.data : error.message);
     }
   }
 
