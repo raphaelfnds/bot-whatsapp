@@ -1,6 +1,9 @@
 Atualização da Documentação do Projeto Bot WhatsApp - Etapa 1
+
 Data de Atualização: 08/10/2025, 17:30 PM -03
+
 Autor: Raphael Fernandes (Engenharia de Software - Bacharelado, Projeto de Extensão I)
+
 Objetivo Geral: Desenvolver um bot SaaS utilizando a WhatsApp Cloud API para difusão cultural, coletando nome, confirmando termos de uso, enviando links fixos (Etapa 1), com escalabilidade para respostas de IA (Etapa 2), alinhado às ODS 4.7 (educação sustentável), 9.c (inclusão digital), 11.4 (preservação patrimonial) e 17.16 (parcerias globais).
 
 Tecnologias Utilizadas
