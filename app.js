@@ -69,13 +69,18 @@ app.post('/webhook', async (req, res) => {
       conversationStates[from] = { state: 'menu_selection', proposedName: existingUser.name, lastMessageTime: now };
       responseText = 'Sobre o que deseja falar?\n1. Agenda.\n2. Edital.\n3. Falar com atendente.\n4. Sair e encerrar o atendimento.';
     } else {
-      // Novo usuário ou sem aceitação de termos
-      let cleanedName = text.trim().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-zA-Z]/g, '');
-      cleanedName = cleanedName.charAt(0).toUpperCase() + cleanedName.slice(1).toLowerCase();
-      conversationStates[from] = { state: 'confirming_name', proposedName: cleanedName || 'Usuario', lastMessageTime: now };
-      responseText = cleanedName ? 
-        `O nome que você escreveu é ${cleanedName}, correto?\n\nDigite:\n1. Para SIM.\n2. Para NAO.\n3. Para SAIR.\nObservação: Ao digitar "1. Para SIM" também estará aceitando a politica de privacidade: https://github.com/raphaelfnds/bot-whatsapp-privacidade/tree/main?tab=readme-ov-file#pol%C3%ADtica-de-privacidade---bot-whatsapp.` :
-        'Bem vindo ao atendimento de IA!\nPor favor, *escreva qual seu nome*.';
+      // Novo usuário: apenas solicita o nome na primeira interação
+      if (!conversationStates[from].proposedName) {
+        conversationStates[from] = { state: 'awaiting_name', lastMessageTime: now };
+        responseText = 'Bem vindo ao atendimento de IA!\nPor favor, *escreva qual seu nome*.';
+      } else {
+        // Segunda interação: limpa nome e avança para confirmação
+        let cleanedName = text.trim().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-zA-Z]/g, '');
+        cleanedName = cleanedName.charAt(0).toUpperCase() + cleanedName.slice(1).toLowerCase();
+        conversationStates[from].proposedName = cleanedName || 'Usuario';
+        conversationStates[from].state = 'confirming_name';
+        responseText = `O nome que você escreveu é ${cleanedName}, correto?\n\nDigite:\n1. Para SIM.\n2. Para NAO.\n3. Para SAIR.\nObservação: Ao digitar "1. Para SIM" também estará aceitando a politica de privacidade: https://github.com/raphaelfnds/bot-whatsapp-privacidade/tree/main?tab=readme-ov-file#pol%C3%ADtica-de-privacidade---bot-whatsapp.`;
+      }
     }
   } else if (state === 'confirming_name') {
     const option = text.trim();
@@ -85,6 +90,7 @@ app.post('/webhook', async (req, res) => {
       responseText = 'Sobre o que deseja falar?\n1. Agenda.\n2. Edital.\n3. Falar com atendente.\n4. Sair e encerrar o atendimento.';
     } else if (option === '2') {
       conversationStates[from].state = 'awaiting_name';
+      delete conversationStates[from].proposedName; // Limpa nome para nova tentativa
       responseText = 'Por favor, escreva qual seu nome.';
     } else if (option === '3') {
       delete conversationStates[from]; // Limpa estado ao sair
