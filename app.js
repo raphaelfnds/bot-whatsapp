@@ -57,34 +57,38 @@ app.post('/webhook', async (req, res) => {
 
   conversationStates[from].lastMessageTime = now; // Atualiza timestamp
 
+  // Reinicia fluxo se estado for 'done' ou timeout ultrapassado
+  if (state === 'done' || (conversationStates[from] && now - conversationStates[from].lastMessageTime > 30 * 60 * 1000)) {
+    delete conversationStates[from]; // Limpa estado após "Sair" ou timeout
+    state = 'awaiting_name';
+  }
+
   if (state === 'awaiting_name') {
-    // Consulta usuário existente no banco - movido para evitar execução em todo ciclo e loop no menu
     const existingUser = await User.findOne({ phone: from });
     if (existingUser && existingUser.acceptedTerms) {
-      conversationStates[from].proposedName = existingUser.name;
-      state = 'menu_selection';
+      conversationStates[from] = { state: 'menu_selection', proposedName: existingUser.name, lastMessageTime: now };
       responseText = 'Sobre o que deseja falar?\n1. Agenda.\n2. Edital.\n3. Falar com atendente.\n4. Sair e encerrar o atendimento.';
-      conversationStates[from].state = 'menu_selection'; // Adicionado para consistência após setar estado
     } else {
-      // Limpeza do nome: remove acentos, especiais, capitaliza primeira letra
+      // Novo usuário ou sem aceitação de termos
       let cleanedName = text.trim().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-zA-Z]/g, '');
       cleanedName = cleanedName.charAt(0).toUpperCase() + cleanedName.slice(1).toLowerCase();
-      conversationStates[from].proposedName = cleanedName || 'Usuario'; // Fallback se vazio
-      responseText = `O nome que você escreveu é ${cleanedName}, correto?\n\nDigite:\n1. Para SIM.\n2. Para NAO.\n3. Para SAIR.\nObservação: Ao digitar "1. Para SIM" também estará aceitando a politica de privacidade: https://github.com/raphaelfnds/bot-whatsapp-privacidade/tree/main?tab=readme-ov-file#pol%C3%ADtica-de-privacidade---bot-whatsapp.`;
-      conversationStates[from].state = 'confirming_name';
+      conversationStates[from] = { state: 'confirming_name', proposedName: cleanedName || 'Usuario', lastMessageTime: now };
+      responseText = cleanedName ? 
+        `O nome que você escreveu é ${cleanedName}, correto?\n\nDigite:\n1. Para SIM.\n2. Para NAO.\n3. Para SAIR.\nObservação: Ao digitar "1. Para SIM" também estará aceitando a politica de privacidade: https://github.com/raphaelfnds/bot-whatsapp-privacidade/tree/main?tab=readme-ov-file#pol%C3%ADtica-de-privacidade---bot-whatsapp.` :
+        'Bem vindo ao atendimento de IA!\nPor favor, *escreva qual seu nome*.';
     }
   } else if (state === 'confirming_name') {
     const option = text.trim();
     if (option === '1') {
       await User.create({ phone: from, name: conversationStates[from].proposedName, acceptedTerms: true });
-      responseText = 'Sobre o que deseja falar?\n1. Agenda.\n2. Edital.\n3. Falar com atendente.\n4. Sair e encerrar o atendimento.';
       conversationStates[from].state = 'menu_selection';
+      responseText = 'Sobre o que deseja falar?\n1. Agenda.\n2. Edital.\n3. Falar com atendente.\n4. Sair e encerrar o atendimento.';
     } else if (option === '2') {
-      responseText = 'Por favor, escreva qual seu nome.';
       conversationStates[from].state = 'awaiting_name';
+      responseText = 'Por favor, escreva qual seu nome.';
     } else if (option === '3') {
+      delete conversationStates[from]; // Limpa estado ao sair
       responseText = 'Agradecemos seu contato.';
-      conversationStates[from].state = 'done';
     } else {
       responseText = `Não entendi sua resposta.\nO nome que você escreveu é ${conversationStates[from].proposedName}, correto?\n\nDigite:\n1. Para SIM.\n2. Para NAO.\n3. Para SAIR.\nObservação: Ao digitar "1. Para SIM" também estará aceitando a politica de privacidade: https://github.com/raphaelfnds/bot-whatsapp-privacidade/tree/main?tab=readme-ov-file#pol%C3%ADtica-de-privacidade---bot-whatsapp.`;
     }
@@ -97,8 +101,8 @@ app.post('/webhook', async (req, res) => {
     } else if (option === '3') {
       responseText = 'Por favor, clique no link para ser redirecionado: https://wa.me/554288768668';
     } else if (option === '4') {
+      delete conversationStates[from]; // Limpa estado ao sair
       responseText = 'Agradecemos seu contato.';
-      conversationStates[from].state = 'done';
     } else {
       responseText = 'Opção inválida.\nSobre o que deseja falar?\n1. Agenda.\n2. Edital.\n3. Falar com atendente.\n4. Sair e encerrar o atendimento.';
     }
