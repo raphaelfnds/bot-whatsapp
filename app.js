@@ -69,12 +69,13 @@ app.post('/webhook', async (req, res) => {
       conversationStates[from] = { state: 'menu_selection', proposedName: existingUser.name, lastMessageTime: now };
       responseText = 'Sobre o que deseja falar?\n1. Agenda.\n2. Edital.\n3. Falar com atendente.\n4. Sair e encerrar o atendimento.';
     } else {
-      // Novo usuário: apenas solicita o nome na primeira interação
-      if (!conversationStates[from].proposedName) {
+      // Novo usuário: controla fluxo em duas etapas
+      if (!conversationStates[from].proposedName && !text.trim()) {
+        // Primeira mensagem: solicita nome
         conversationStates[from] = { state: 'awaiting_name', lastMessageTime: now };
         responseText = 'Bem vindo ao atendimento de IA!\nPor favor, *escreva qual seu nome*.';
-      } else {
-        // Segunda interação: limpa nome e avança para confirmação
+      } else if (!conversationStates[from].proposedName && text.trim()) {
+        // Segunda mensagem: processa nome e avança para confirmação
         let cleanedName = text.trim().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-zA-Z]/g, '');
         cleanedName = cleanedName.charAt(0).toUpperCase() + cleanedName.slice(1).toLowerCase();
         conversationStates[from].proposedName = cleanedName || 'Usuario';
