@@ -46,60 +46,59 @@ app.post('/webhook', async (req, res) => {
   const text = event.value.messages[0].text.body;
   let responseText = '';
   let state = conversationStates[from]?.state || 'awaiting_name';
+  const now = Date.now();
+
+  // Verifica timeout de 30 minutos
+  if (conversationStates[from] && now - conversationStates[from].lastMessageTime > 30 * 60 * 1000) {
+    state = 'awaiting_name'; // Reset após 30 min
+  }
 
   if (!conversationStates[from]) conversationStates[from] = {};
 
-  // Nova regra: Início com "Olá" ou qualquer texto
-  if (state === 'awaiting_name') {
-    let cleanedName = text.trim().replace(/[^a-zA-Z]/g, ''); // Remove caracteres especiais
-    cleanedName = cleanedName.charAt(0).toUpperCase() + cleanedName.slice(1).toLowerCase(); // Primeira maiúscula
-    conversationStates[from].proposedName = cleanedName || 'Usuário'; // Fallback se vazio
-    responseText = `Bem-vindo ao atendimento de IA! O nome que você escreveu é ${cleanedName}, correto? Digite SIM para confirmar, NAO para corrigir ou SAIR para encerrar o atendimento.`;
+  conversationStates[from].lastMessageTime = now; // Atualiza timestamp
+
+  // Consulta usuário existente no banco
+  const existingUser = await User.findOne({ phone: from });
+
+  if (existingUser && existingUser.acceptedTerms) {
+    conversationStates[from].proposedName = existingUser.name;
+    state = 'menu_selection';
+    responseText = 'Sobre o que deseja falar?\n1. Agenda.\n2. Edital.\n3. Falar com atendente.\n4. Sair e encerrar o atendimento.';
+  } else if (state === 'awaiting_name') {
+    // Limpeza do nome: remove acentos, especiais, capitaliza primeira letra
+    let cleanedName = text.trim().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-zA-Z]/g, '');
+    cleanedName = cleanedName.charAt(0).toUpperCase() + cleanedName.slice(1).toLowerCase();
+    conversationStates[from].proposedName = cleanedName || 'Usuario'; // Fallback se vazio
+    responseText = `O nome que você escreveu é ${cleanedName}, correto?\n\nDigite:\n1. Para SIM.\n2. Para NAO.\n3. Para SAIR.\nObservação: Ao digitar "1. Para SIM" também estará aceitando a politica de privacidade: https://github.com/raphaelfnds/bot-whatsapp-privacidade/tree/main?tab=readme-ov-file#pol%C3%ADtica-de-privacidade---bot-whatsapp.`;
     conversationStates[from].state = 'confirming_name';
   } else if (state === 'confirming_name') {
-    if (text.toUpperCase() === 'SIM') {
-      await User.create({ phone: from, name: conversationStates[from].proposedName, acceptedTerms: false });
-      responseText = `Link para política de privacidade: https://github.com/raphaelfnds/bot-whatsapp-privacidade/blob/main/PRIVACY.md\nVocê concorda com as políticas de privacidade? Digite SIM para confirmar, NAO para recusar e sair.`;
-      conversationStates[from].state = 'confirming_terms';
-    } else if (text.toUpperCase() === 'NAO') {
-      responseText = 'Por favor, escreva como gostaria de ser chamado.';
-      conversationStates[from].state = 'awaiting_name'; // Loop
-    } else if (text.toUpperCase() === 'SAIR') {
-      responseText = 'Agradecemos seu contato.';
-      conversationStates[from].state = 'done';
-    } else {
-      responseText = 'Opção inválida. Digite SIM para confirmar, NAO para corrigir ou SAIR para encerrar.';
-    }
-  } else if (state === 'confirming_terms') {
-    if (text.toUpperCase() === 'SIM') {
-      await User.findOneAndUpdate({ phone: from }, { acceptedTerms: true });
-      responseText = 'Digite o número do item ao qual deseja falar:\n1. Agenda.\n2. Assunto X.\n3. Falar com atendente.\n4. Sair e encerrar o atendimento.';
+    const option = text.trim();
+    if (option === '1') {
+      await User.create({ phone: from, name: conversationStates[from].proposedName, acceptedTerms: true });
+      responseText = 'Sobre o que deseja falar?\n1. Agenda.\n2. Edital.\n3. Falar com atendente.\n4. Sair e encerrar o atendimento.';
       conversationStates[from].state = 'menu_selection';
-    } else if (text.toUpperCase() === 'NAO') {
+    } else if (option === '2') {
+      responseText = 'Por favor, escreva qual seu nome.';
+      conversationStates[from].state = 'awaiting_name';
+    } else if (option === '3') {
       responseText = 'Agradecemos seu contato.';
       conversationStates[from].state = 'done';
     } else {
-      responseText = 'Responda SIM para confirmar ou NAO para recusar.';
+      responseText = `Não entendi sua resposta.\nO nome que você escreveu é ${conversationStates[from].proposedName}, correto?\n\nDigite:\n1. Para SIM.\n2. Para NAO.\n3. Para SAIR.\nObservação: Ao digitar "1. Para SIM" também estará aceitando a politica de privacidade: https://github.com/raphaelfnds/bot-whatsapp-privacidade/tree/main?tab=readme-ov-file#pol%C3%ADtica-de-privacidade---bot-whatsapp.`;
     }
   } else if (state === 'menu_selection') {
     const option = text.trim();
-    let helpMore = '\nPodemos ajudar em mais alguma coisa? Digite SIM para voltar ao menu anterior ou SAIR para encerrar.';
     if (option === '1') {
-      responseText = 'Segue link para visualizar: https://calendar.google.com/calendar/u/0/r?pli=1' + helpMore;
+      responseText = 'Por favor, acesso o link: https://cultura.pontagrossa.pr.gov.br/agenda-cultural/';
     } else if (option === '2') {
-      responseText = 'Segue link para visualizar: https://github.com/raphaelfnds?tab=repositories' + helpMore;
+      responseText = 'Por favor, acesso o link: https://cultura.pontagrossa.pr.gov.br/2025-2/';
     } else if (option === '3') {
-      responseText = 'Certo, por favor clique no link para ser encaminhado: https://wa.me/554288768668' + helpMore;
+      responseText = 'Por favor, clique no link para ser redirecionado: https://wa.me/554288768668';
     } else if (option === '4') {
       responseText = 'Agradecemos seu contato.';
       conversationStates[from].state = 'done';
-    } else if (text.toUpperCase() === 'SIM') {
-      responseText = 'Digite o número do item ao qual deseja falar:\n1. Agenda.\n2. Assunto X.\n3. Falar com atendente.\n4. Sair e encerrar o atendimento.';
-    } else if (text.toUpperCase() === 'SAIR') {
-      responseText = 'Agradecemos seu contato.';
-      conversationStates[from].state = 'done';
     } else {
-      responseText = 'Opção inválida. Digite o número do item ou SIM/SAIR.';
+      responseText = 'Opção inválida.\nSobre o que deseja falar?\n1. Agenda.\n2. Edital.\n3. Falar com atendente.\n4. Sair e encerrar o atendimento.';
     }
   }
 
