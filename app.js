@@ -44,13 +44,17 @@ app.get('/webhook', (req, res) => {
 
 // Webhook
 app.post('/webhook', async (req, res) => {
+  console.log('Webhook recebido:', JSON.stringify(req.body, null, 2)); // Novo: Log completo do payload para diagnóstico
+
   const body = req.body;
-  if (!body || !body.entry) return res.sendStatus(200);
+  if (!body || !body.entry) {
+    console.log('Payload sem entry ou inválido'); // Novo: Log específico
+    return res.sendStatus(200);
+  }
 
   const entry = body.entry[0];
-  if (!entry.changes || !entry.changes[0] || !entry.changes[0].value ||
-      !entry.changes[0].value.messages || !entry.changes[0].value.messages[0]) {
-    console.error('Payload inválido:', body);
+  if (!entry.changes || !entry.changes[0] || !entry.changes[0].value || !entry.changes[0].value.messages || !entry.changes[0].value.messages[0]) {
+    console.error('Payload inválido (sem messages):', JSON.stringify(body, null, 2)); // Atualizado: Log mais detalhado
     return res.sendStatus(200);
   }
 
