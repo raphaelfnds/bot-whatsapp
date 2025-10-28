@@ -185,7 +185,7 @@ app.post('/webhook', async (req, res) => {
   if (responseText) {
     try {
       await axios.post(
-        `https://graph.facebook.com/v22.0/${process.env.PHONE_NUMBER_ID || '748970534975341'}/messages`,
+        `https://graph.facebook.com/v24.0/${process.env.PHONE_NUMBER_ID}/messages`, // ← Corrigido
         {
           messaging_product: 'whatsapp',
           to: from,
