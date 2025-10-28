@@ -1,6 +1,14 @@
+// Carrega .env apenas em desenvolvimento (não afeta Render.com)
+if (process.env.NODE_ENV !== 'production') {
+  require('dotenv').config(); // Carrega .env localmente
+}
+
 const express = require('express');
 const mongoose = require('mongoose');
 const axios = require('axios');
+const { InferenceClient } = require('@huggingface/inference'); // Cliente recomendado
+const Firecrawl = require('@mendable/firecrawl-js');
+const pdfParse = require('pdf-parse'); // ainda não usado, mas já importado
 
 const app = express();
 app.use(express.json());
@@ -9,6 +17,10 @@ app.use(express.json());
 mongoose.connect(process.env.MONGODB_URI)
   .then(() => console.log('Conectado ao MongoDB'))
   .catch(err => console.error('Erro:', err));
+
+// Inicialização de clients para IA e scraping
+const hf = new InferenceClient({ token: process.env.HUGGINGFACE_TOKEN });
+const firecrawl = new Firecrawl.Firecrawl({ apiKey: process.env.FIRECRAWL_API_KEY });
 
 // Schema User
 const User = require('./models/User');
@@ -36,7 +48,8 @@ app.post('/webhook', async (req, res) => {
   if (!body || !body.entry) return res.sendStatus(200);
 
   const entry = body.entry[0];
-  if (!entry.changes || !entry.changes[0] || !entry.changes[0].value || !entry.changes[0].value.messages || !entry.changes[0].value.messages[0]) {
+  if (!entry.changes || !entry.changes[0] || !entry.changes[0].value ||
+      !entry.changes[0].value.messages || !entry.changes[0].value.messages[0]) {
     console.error('Payload inválido:', body);
     return res.sendStatus(200);
   }
@@ -48,35 +61,33 @@ app.post('/webhook', async (req, res) => {
   let state = conversationStates[from]?.state || 'awaiting_name';
   const now = Date.now();
 
-  // Verifica timeout de 30 minutos
+  // ---------- TIMEOUT ----------
   if (conversationStates[from] && now - conversationStates[from].lastMessageTime > 30 * 60 * 1000) {
     state = 'awaiting_name'; // Reset após 30 min
   }
 
   if (!conversationStates[from]) conversationStates[from] = {};
+  conversationStates[from].lastMessageTime = now;
 
-  conversationStates[from].lastMessageTime = now; // Atualiza timestamp
-
-  // Reinicia fluxo se estado for 'done' ou timeout ultrapassado
+  // Reinicia fluxo se estado for 'done' ou timeout
   if (state === 'done' || (conversationStates[from] && now - conversationStates[from].lastMessageTime > 30 * 60 * 1000)) {
-    delete conversationStates[from]; // Limpa estado após "Sair" ou timeout
+    delete conversationStates[from];
     state = 'awaiting_name';
   }
 
+  // ---------- ESTADOS ----------
   if (state === 'awaiting_name') {
     const existingUser = await User.findOne({ phone: from });
     if (existingUser && existingUser.acceptedTerms) {
       conversationStates[from] = { state: 'menu_selection', proposedName: existingUser.name, lastMessageTime: now };
       responseText = 'Sobre o que deseja falar?\n1. Agenda.\n2. Edital.\n3. Falar com atendente.\n4. Sair e encerrar o atendimento.';
     } else {
-      // Novo usuário: usa flag 'welcomed' para controlar fluxo em duas etapas
       if (!conversationStates[from].welcomed) {
-        // Primeira interação: envia boas-vindas e seta flag
         conversationStates[from].welcomed = true;
         responseText = 'Bem vindo ao atendimento de IA!\nPor favor, *escreva qual seu nome*.';
       } else {
-        // Segunda interação: processa nome e avança para confirmação
-        let cleanedName = text.trim().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-zA-Z]/g, '');
+        let cleanedName = text.trim().normalize('NFD')
+          .replace(/[\u0300-\u036f]/g, '').replace(/[^a-zA-Z]/g, '');
         cleanedName = cleanedName.charAt(0).toUpperCase() + cleanedName.slice(1).toLowerCase();
         conversationStates[from].proposedName = cleanedName || 'Usuario';
         conversationStates[from].state = 'confirming_name';
@@ -91,35 +102,90 @@ app.post('/webhook', async (req, res) => {
       responseText = 'Sobre o que deseja falar?\n1. Agenda.\n2. Edital.\n3. Falar com atendente.\n4. Sair e encerrar o atendimento.';
     } else if (option === '2') {
       conversationStates[from].state = 'awaiting_name';
-      delete conversationStates[from].proposedName; // Limpa nome para nova tentativa
+      delete conversationStates[from].proposedName;
       responseText = 'Por favor, escreva qual seu nome.';
     } else if (option === '3') {
-      delete conversationStates[from]; // Limpa estado ao sair
+      delete conversationStates[from];
       responseText = 'Agradecemos seu contato.';
     } else {
       responseText = `Não entendi sua resposta.\nO nome que você escreveu é ${conversationStates[from].proposedName}, correto?\n\nDigite:\n1. Para SIM.\n2. Para NAO.\n3. Para SAIR.\nObservação: Ao digitar "1. Para SIM" também estará aceitando a politica de privacidade: https://github.com/raphaelfnds/bot-whatsapp-privacidade/tree/main?tab=readme-ov-file#pol%C3%ADtica-de-privacidade---bot-whatsapp.`;
     }
   } else if (state === 'menu_selection') {
     const option = text.trim();
+
+    // ---------- OPÇÕES QUE LEVAM A DÚVIDA ----------
     if (option === '1') {
-      responseText = 'Por favor, acesso o link: https://cultura.pontagrossa.pr.gov.br/agenda-cultural/';
+      conversationStates[from].topic = 'agenda';
+      conversationStates[from].state = 'awaiting_question';
+      responseText = 'Qual é a sua dúvida sobre a *agenda cultural*?';
     } else if (option === '2') {
-      responseText = 'Por favor, acesso o link: https://cultura.pontagrossa.pr.gov.br/2025-2/';
+      conversationStates[from].topic = 'edital';
+      conversationStates[from].state = 'awaiting_question';
+      responseText = 'Qual é a sua dúvida sobre o *edital*?';
     } else if (option === '3') {
       responseText = 'Por favor, clique no link para ser redirecionado: https://wa.me/554288768668';
     } else if (option === '4') {
-      delete conversationStates[from]; // Limpa estado ao sair
+      delete conversationStates[from];
       responseText = 'Agradecemos seu contato.';
     } else {
       responseText = 'Opção inválida.\nSobre o que deseja falar?\n1. Agenda.\n2. Edital.\n3. Falar com atendente.\n4. Sair e encerrar o atendimento.';
     }
+
+  // ---------- ESTADO DE COLETA DA DÚVIDA ----------
+  } else if (state === 'awaiting_question') {
+    const question = text.trim();
+    let context = '';
+    const urls = [];
+
+    // URLs de contexto (expansível via DB futuramente)
+    if (conversationStates[from].topic === 'agenda') {
+      urls.push('https://cultura.pontagrossa.pr.gov.br/agenda-cultural/');
+    } else if (conversationStates[from].topic === 'edital') {
+      urls.push('https://cultura.pontagrossa.pr.gov.br/2025-2/');
+    }
+
+    try {
+      // Scraping
+      for (const url of urls) {
+        const scrape = await firecrawl.scrapeUrl(url, { formats: ['markdown'] });
+        context += scrape.markdown + ' ';
+      }
+
+      // IA (Hugging Face)
+      const aiResponse = await hf.questionAnswering({
+        model: 'deepset/roberta-base-squad2',
+        inputs: { question, context }
+      });
+
+      responseText = aiResponse.answer || 'Desculpe, não consegui encontrar uma resposta clara.';
+      responseText += '\n\nPodemos ajudar em mais alguma coisa?\n1. Voltar ao menu\n2. Sair';
+      conversationStates[from].state = 'awaiting_help';
+    } catch (error) {
+      console.error('Erro na IA/Firecrawl:', error);
+      responseText = 'Desculpe, ocorreu um erro ao processar sua dúvida. Tente novamente.';
+      responseText += '\n\n1. Voltar ao menu\n2. Sair';
+      conversationStates[from].state = 'awaiting_help';
+    }
+
+  // ---------- ESTADO PÓS‑RESPOSTA ----------
+  } else if (state === 'awaiting_help') {
+    const opt = text.trim();
+    if (opt === '1') {
+      conversationStates[from].state = 'menu_selection';
+      responseText = 'Sobre o que deseja falar?\n1. Agenda.\n2. Edital.\n3. Falar com atendente.\n4. Sair e encerrar o atendimento.';
+    } else if (opt === '2') {
+      delete conversationStates[from];
+      responseText = 'Agradecemos seu contato.';
+    } else {
+      responseText = 'Opção inválida. Digite:\n1. Voltar ao menu\n2. Sair';
+    }
   }
 
-  // Enviar resposta via WhatsApp API
+  // ---------- ENVIO DA RESPOSTA ----------
   if (responseText) {
     try {
       await axios.post(
-        `https://graph.facebook.com/v22.0/748970534975341/messages`,
+        `https://graph.facebook.com/v22.0/${process.env.PHONE_NUMBER_ID || '748970534975341'}/messages`,
         {
           messaging_product: 'whatsapp',
           to: from,
