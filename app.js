@@ -1,14 +1,14 @@
-// Carrega .env apenas em desenvolvimento (não afeta Render.com)
+// Carrega .env apenas em desenvolvimento
 if (process.env.NODE_ENV !== 'production') {
-  require('dotenv').config(); // Carrega .env localmente
+  require('dotenv').config();
 }
 
 const express = require('express');
 const mongoose = require('mongoose');
 const axios = require('axios');
-const { InferenceClient } = require('@huggingface/inference'); // Cliente recomendado
-const { Firecrawl } = require('@mendable/firecrawl-js');
-const pdfParse = require('pdf-parse'); // ainda não usado, mas já importado
+const { GoogleGenerativeAI } = require('@google/generative-ai');
+const puppeteer = require('puppeteer-core'); // Usa Chrome já instalado no Render
+const chromium = require('@sparticuz/chromium'); // Chrome binário para Render
 
 const app = express();
 app.use(express.json());
@@ -18,22 +18,22 @@ mongoose.connect(process.env.MONGODB_URI)
   .then(() => console.log('Conectado ao MongoDB'))
   .catch(err => console.error('Erro:', err));
 
-// Inicialização de clients para IA e scraping
-const hf = new InferenceClient({ token: process.env.HUGGINGFACE_TOKEN });
-const firecrawl = new Firecrawl({ apiKey: process.env.FIRECRAWL_API_KEY });
+// Inicialização Gemini
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+const geminiModel = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
 
 // Schema User
 const User = require('./models/User');
 
-// Estados em memória
+// Estados + cache deduplicação
 const conversationStates = {};
+const processedCache = new Map();
+const CACHE_TTL = 5 * 60 * 1000;
 
 app.get('/webhook', (req, res) => {
   const mode = req.query['hub.mode'];
   const token = req.query['hub.verify_token'];
   const challenge = req.query['hub.challenge'];
-
-  console.log('Webhook Challenge:', { mode, token, challenge });
 
   if (mode === 'subscribe' && token === 'meuTokenSecreto2025') {
     res.status(200).send(challenge);
@@ -42,42 +42,39 @@ app.get('/webhook', (req, res) => {
   }
 });
 
-// Webhook
 app.post('/webhook', async (req, res) => {
-  console.log('Webhook recebido:', JSON.stringify(req.body, null, 2)); // Novo: Log completo do payload para diagnóstico
+  console.log('Webhook recebido:', JSON.stringify(req.body, null, 2));
 
   const body = req.body;
-  if (!body || !body.entry) {
-    console.log('Payload sem entry ou inválido'); // Novo: Log específico
+  if (!body?.entry?.[0]?.changes?.[0]?.value?.messages?.[0]) {
+    console.log('Payload inválido');
     return res.sendStatus(200);
   }
 
-  const entry = body.entry[0];
-  if (!entry.changes || !entry.changes[0] || !entry.changes[0].value || !entry.changes[0].value.messages || !entry.changes[0].value.messages[0]) {
-    console.error('Payload inválido (sem messages):', JSON.stringify(body, null, 2)); // Atualizado: Log mais detalhado
+  const message = body.entry[0].changes[0].value.messages[0];
+  const msgId = message.id;
+  const from = message.from;
+  const text = message.text?.body?.trim();
+
+  // === DEDUPLICAÇÃO ===
+  if (processedCache.has(msgId)) {
+    console.log(`Duplicado ignorado: ${msgId}`);
     return res.sendStatus(200);
   }
+  processedCache.set(msgId, Date.now());
+  setTimeout(() => processedCache.delete(msgId), CACHE_TTL);
 
-  const event = entry.changes[0];
-  const from = event.value.messages[0].from;
-  const text = event.value.messages[0].text.body;
-  let responseText = '';
   let state = conversationStates[from]?.state || 'awaiting_name';
   const now = Date.now();
 
-  // ---------- TIMEOUT ----------
   if (conversationStates[from] && now - conversationStates[from].lastMessageTime > 30 * 60 * 1000) {
-    state = 'awaiting_name'; // Reset após 30 min
+    state = 'awaiting_name';
   }
 
   if (!conversationStates[from]) conversationStates[from] = {};
   conversationStates[from].lastMessageTime = now;
 
-  // Reinicia fluxo se estado for 'done' ou timeout
-  if (state === 'done' || (conversationStates[from] && now - conversationStates[from].lastMessageTime > 30 * 60 * 1000)) {
-    delete conversationStates[from];
-    state = 'awaiting_name';
-  }
+  let responseText = '';
 
   // ---------- ESTADOS ----------
   if (state === 'awaiting_name') {
@@ -116,8 +113,6 @@ app.post('/webhook', async (req, res) => {
     }
   } else if (state === 'menu_selection') {
     const option = text.trim();
-
-    // ---------- OPÇÕES QUE LEVAM A DÚVIDA ----------
     if (option === '1') {
       conversationStates[from].topic = 'agenda';
       conversationStates[from].state = 'awaiting_question';
@@ -134,51 +129,55 @@ app.post('/webhook', async (req, res) => {
     } else {
       responseText = 'Opção inválida.\nSobre o que deseja falar?\n1. Agenda.\n2. Edital.\n3. Falar com atendente.\n4. Sair e encerrar o atendimento.';
     }
-
-  // ---------- ESTADO DE COLETA DA DÚVIDA ----------
   } else if (state === 'awaiting_question') {
     const question = text.trim();
     let context = '';
-    const urls = [];
-
-    // URLs de contexto (expansível via DB futuramente)
-    if (conversationStates[from].topic === 'agenda') {
-      urls.push('https://cultura.pontagrossa.pr.gov.br/agenda-cultural/');
-    } else if (conversationStates[from].topic === 'edital') {
-      urls.push('https://cultura.pontagrossa.pr.gov.br/2025-2/');
-    }
+    const url = conversationStates[from].topic === 'agenda'
+      ? 'https://cultura.pontagrossa.pr.gov.br/agenda-cultural/'
+      : 'https://cultura.pontagrossa.pr.gov.br/2025-2/';
 
     try {
-      // Scraping
-      for (const url of urls) {
-        const scraped = await firecrawl.scrape({ url, timeout: 120000 })
-        console.log('Scraped Markdown (primeiros 500 chars):', scraped.markdown.substring(0, 500));
-        context += scraped.markdown + ' ';
-      }
-
-      // IA (Hugging Face)
-      const aiResponse = await hf.questionAnswering({
-        model: 'deepset/roberta-base-squad2',
-        inputs: { question, context }
+      // === PUPPETEER SCRAPING ===
+      const browser = await puppeteer.launch({
+        args: chromium.args,
+        defaultViewport: chromium.defaultViewport,
+        executablePath: await chromium.executablePath(),
+        headless: true,
+        timeout: 30000 // 30s
       });
+      const page = await browser.newPage();
+      await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
+      const html = await page.content();
+      await browser.close();
 
-      responseText = aiResponse.answer || 'Desculpe, não consegui encontrar uma resposta clara.';
-      responseText += '\n\nPodemos ajudar em mais alguma coisa?\n1. Voltar ao menu\n2. Sair';
+      // Remove scripts, estilos e limpa
+      const cleanText = html
+        .replace(/<script[\s\S]*?<\/script>/gi, '')
+        .replace(/<style[\s\S]*?<\/style>/gi, '')
+        .replace(/<[^>]*>/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+
+      context = cleanText.substring(0, 60000); // Gemini aceita até 1M, mas limitamos
+      console.log('Contexto extraído (primeiros 500):', context.substring(0, 500));
+
+      // === GEMINI IA ===
+      const prompt = `Contexto do site oficial (extraído com Puppeteer):\n${context}\n\nPergunta do usuário: ${question}\n\nResponda em português, de forma clara, objetiva e amigável. Se não souber, diga: "Não encontrei informações sobre isso."`;
+      const result = await geminiModel.generateContent(prompt);
+      const aiResponse = result.response.text();
+
+      responseText = aiResponse + '\n\n1. Voltar ao menu\n2. Sair';
       conversationStates[from].state = 'awaiting_help';
     } catch (error) {
-    console.error('Erro na IA/Firecrawl (detalhes):', {
-      message: error.message,
-      stack: error.stack,
-      topic: conversationStates[from].topic,
-      urls: urls,
-      question: question
-    });
-    responseText = 'Desculpe, ocorreu um erro ao processar sua dúvida. Tente novamente.';
-    responseText += '\n\n1. Voltar ao menu\n2. Sair';
-    conversationStates[from].state = 'awaiting_help';
-  }
-
-  // ---------- ESTADO PÓS‑RESPOSTA ----------
+      console.error('Erro Puppeteer/Gemini:', {
+        message: error.message,
+        stack: error.stack,
+        url,
+        question
+      });
+      responseText = 'Desculpe, ocorreu um erro ao processar sua dúvida. Tente novamente.\n\n1. Voltar ao menu\n2. Sair';
+      conversationStates[from].state = 'awaiting_help';
+    }
   } else if (state === 'awaiting_help') {
     const opt = text.trim();
     if (opt === '1') {
@@ -192,11 +191,11 @@ app.post('/webhook', async (req, res) => {
     }
   }
 
-  // ---------- ENVIO DA RESPOSTA ----------
+  // Envio
   if (responseText) {
     try {
       await axios.post(
-        `https://graph.facebook.com/v24.0/${process.env.PHONE_NUMBER_ID}/messages`, // ← Corrigido
+        `https://graph.facebook.com/v24.0/${process.env.PHONE_NUMBER_ID}/messages`,
         {
           messaging_product: 'whatsapp',
           to: from,
@@ -210,13 +209,9 @@ app.post('/webhook', async (req, res) => {
           }
         }
       );
-      console.log(`Mensagem enviada para ${from}: ${responseText}`);
+      console.log(`Enviado para ${from}: ${responseText}`);
     } catch (error) {
-      console.error('Erro ao enviar mensagem:', {
-        status: error.response?.status,
-        data: error.response?.data,
-        message: error.message
-      });
+      console.error('Erro envio:', error.response?.data || error.message);
     }
   }
 
@@ -224,5 +219,4 @@ app.post('/webhook', async (req, res) => {
   res.sendStatus(200);
 });
 
-// Iniciar servidor
-app.listen(process.env.PORT || 10000, () => console.log('Servidor rodando na porta', process.env.PORT || 10000));
+app.listen(process.env.PORT || 10000, () => console.log('Servidor na porta', process.env.PORT || 10000));
