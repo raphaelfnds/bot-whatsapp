@@ -1,4 +1,4 @@
-// Carrega .env apenas em desenvolvimento
+// app.js - VERSÃO FINAL: Axios + Cheerio + Gemini + Deduplicação
 if (process.env.NODE_ENV !== 'production') {
   require('dotenv').config();
 }
@@ -6,217 +6,168 @@ if (process.env.NODE_ENV !== 'production') {
 const express = require('express');
 const mongoose = require('mongoose');
 const axios = require('axios');
+const cheerio = require('cheerio');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
-const puppeteer = require('puppeteer-core'); // Usa Chrome já instalado no Render
-const chromium = require('@sparticuz/chromium'); // Chrome binário para Render
 
 const app = express();
 app.use(express.json());
 
-// Conexão MongoDB
+// MongoDB
 mongoose.connect(process.env.MONGODB_URI)
-  .then(() => console.log('Conectado ao MongoDB'))
-  .catch(err => console.error('Erro:', err));
+  .then(() => console.log('MongoDB conectado'))
+  .catch(err => console.error('Erro MongoDB:', err));
 
-// Inicialização Gemini
+// Gemini
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 const geminiModel = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
 
-// Schema User
+// Model
 const User = require('./models/User');
 
-// Estados + cache deduplicação
+// Estados + Cache de wamids
 const conversationStates = {};
-const processedCache = new Map();
-const CACHE_TTL = 5 * 60 * 1000;
+const processedWamids = new Map();
+const CACHE_TTL = 10 * 60 * 1000;
 
 app.get('/webhook', (req, res) => {
-  const mode = req.query['hub.mode'];
-  const token = req.query['hub.verify_token'];
-  const challenge = req.query['hub.challenge'];
-
-  if (mode === 'subscribe' && token === 'meuTokenSecreto2025') {
-    res.status(200).send(challenge);
+  if (req.query['hub.mode'] === 'subscribe' && req.query['hub.verify_token'] === 'meuTokenSecreto2025') {
+    res.send(req.query['hub.challenge']);
   } else {
     res.sendStatus(403);
   }
 });
 
 app.post('/webhook', async (req, res) => {
-  console.log('Webhook recebido:', JSON.stringify(req.body, null, 2));
-
   const body = req.body;
-  if (!body?.entry?.[0]?.changes?.[0]?.value?.messages?.[0]) {
-    console.log('Payload inválido');
-    return res.sendStatus(200);
-  }
+  if (!body?.entry?.[0]?.changes?.[0]?.value) return res.sendStatus(200);
 
-  const message = body.entry[0].changes[0].value.messages[0];
-  const msgId = message.id;
-  const from = message.from;
-  const text = message.text?.body?.trim();
+  const change = body.entry[0].changes[0].value;
+  const wamid = change.messages?.[0]?.id || change.statuses?.[0]?.id;
+  if (!wamid || processedWamids.has(wamid)) return res.sendStatus(200);
+  processedWamids.set(wamid, Date.now());
+  setTimeout(() => processedWamids.delete(wamid), CACHE_TTL);
 
-  // === DEDUPLICAÇÃO ===
-  if (processedCache.has(msgId)) {
-    console.log(`Duplicado ignorado: ${msgId}`);
-    return res.sendStatus(200);
-  }
-  processedCache.set(msgId, Date.now());
-  setTimeout(() => processedCache.delete(msgId), CACHE_TTL);
+  if (!change.messages?.[0]) return res.sendStatus(200);
+
+  const { from, text } = change.messages[0];
+  const message = text?.body?.trim();
+  if (!message) return res.sendStatus(200);
 
   let state = conversationStates[from]?.state || 'awaiting_name';
   const now = Date.now();
-
   if (conversationStates[from] && now - conversationStates[from].lastMessageTime > 30 * 60 * 1000) {
+    delete conversationStates[from];
     state = 'awaiting_name';
   }
-
-  if (!conversationStates[from]) conversationStates[from] = {};
+  if (!conversationStates[from]) conversationStates[from] = { lastMessageTime: now };
   conversationStates[from].lastMessageTime = now;
 
-  let responseText = '';
+  let response = '';
 
-  // ---------- ESTADOS ----------
+  // ========== ESTADOS ==========
   if (state === 'awaiting_name') {
-    const existingUser = await User.findOne({ phone: from });
-    if (existingUser && existingUser.acceptedTerms) {
-      conversationStates[from] = { state: 'menu_selection', proposedName: existingUser.name, lastMessageTime: now };
-      responseText = 'Sobre o que deseja falar?\n1. Agenda.\n2. Edital.\n3. Falar com atendente.\n4. Sair e encerrar o atendimento.';
+    const user = await User.findOne({ phone: from });
+    if (user?.acceptedTerms) {
+      conversationStates[from].state = 'menu_selection';
+      response = 'Sobre o que deseja falar?\n1. Agenda.\n2. Edital.\n3. Falar com atendente.\n4. Sair.';
     } else {
       if (!conversationStates[from].welcomed) {
         conversationStates[from].welcomed = true;
-        responseText = 'Bem vindo ao atendimento de IA!\nPor favor, *escreva qual seu nome*.';
+        response = 'Bem-vindo! Por favor, *escreva seu nome*.';
       } else {
-        let cleanedName = text.trim().normalize('NFD')
-          .replace(/[\u0300-\u036f]/g, '').replace(/[^a-zA-Z]/g, '');
-        cleanedName = cleanedName.charAt(0).toUpperCase() + cleanedName.slice(1).toLowerCase();
-        conversationStates[from].proposedName = cleanedName || 'Usuario';
+        const name = message.normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-zA-Z ]/g, '');
+        const cleanName = name.split(' ').map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join(' ');
+        conversationStates[from].proposedName = cleanName || 'Usuário';
         conversationStates[from].state = 'confirming_name';
-        responseText = `O nome que você escreveu é ${cleanedName}, correto?\n\nDigite:\n1. Para SIM.\n2. Para NAO.\n3. Para SAIR.\nObservação: Ao digitar "1. Para SIM" também estará aceitando a politica de privacidade: https://github.com/raphaelfnds/bot-whatsapp-privacidade/tree/main?tab=readme-ov-file#pol%C3%ADtica-de-privacidade---bot-whatsapp.`;
+        response = `Seu nome é *${cleanName}*?\n\n1. SIM\n2. NÃO\n3. SAIR`;
       }
     }
-  } else if (state === 'confirming_name') {
-    const option = text.trim();
-    if (option === '1') {
+  }
+
+  else if (state === 'confirming_name') {
+    if (message === '1') {
       await User.create({ phone: from, name: conversationStates[from].proposedName, acceptedTerms: true });
       conversationStates[from].state = 'menu_selection';
-      responseText = 'Sobre o que deseja falar?\n1. Agenda.\n2. Edital.\n3. Falar com atendente.\n4. Sair e encerrar o atendimento.';
-    } else if (option === '2') {
+      response = 'Sobre o que deseja falar?\n1. Agenda.\n2. Edital.\n3. Falar com atendente.\n4. Sair.';
+    } else if (message === '2') {
       conversationStates[from].state = 'awaiting_name';
       delete conversationStates[from].proposedName;
-      responseText = 'Por favor, escreva qual seu nome.';
-    } else if (option === '3') {
+      response = 'Por favor, escreva seu nome novamente.';
+    } else if (message === '3') {
       delete conversationStates[from];
-      responseText = 'Agradecemos seu contato.';
+      response = 'Atendimento encerrado.';
     } else {
-      responseText = `Não entendi sua resposta.\nO nome que você escreveu é ${conversationStates[from].proposedName}, correto?\n\nDigite:\n1. Para SIM.\n2. Para NAO.\n3. Para SAIR.\nObservação: Ao digitar "1. Para SIM" também estará aceitando a politica de privacidade: https://github.com/raphaelfnds/bot-whatsapp-privacidade/tree/main?tab=readme-ov-file#pol%C3%ADtica-de-privacidade---bot-whatsapp.`;
+      response = 'Resposta inválida. Digite 1, 2 ou 3.';
     }
-  } else if (state === 'menu_selection') {
-    const option = text.trim();
-    if (option === '1') {
+  }
+
+  else if (state === 'menu_selection') {
+    if (message === '1') {
       conversationStates[from].topic = 'agenda';
       conversationStates[from].state = 'awaiting_question';
-      responseText = 'Qual é a sua dúvida sobre a *agenda cultural*?';
-    } else if (option === '2') {
+      response = 'Qual sua dúvida sobre a *agenda cultural*?';
+    } else if (message === '2') {
       conversationStates[from].topic = 'edital';
       conversationStates[from].state = 'awaiting_question';
-      responseText = 'Qual é a sua dúvida sobre o *edital*?';
-    } else if (option === '3') {
-      responseText = 'Por favor, clique no link para ser redirecionado: https://wa.me/554288768668';
-    } else if (option === '4') {
+      response = 'Qual sua dúvida sobre o *edital*?';
+    } else if (message === '3') {
+      response = 'Redirecionando: https://wa.me/554288768668';
+    } else if (message === '4') {
       delete conversationStates[from];
-      responseText = 'Agradecemos seu contato.';
+      response = 'Obrigado!';
     } else {
-      responseText = 'Opção inválida.\nSobre o que deseja falar?\n1. Agenda.\n2. Edital.\n3. Falar com atendente.\n4. Sair e encerrar o atendimento.';
+      response = 'Opção inválida. Escolha 1 a 4.';
     }
-  } else if (state === 'awaiting_question') {
-    const question = text.trim();
-    let context = '';
+  }
+
+  else if (state === 'awaiting_question') {
     const url = conversationStates[from].topic === 'agenda'
       ? 'https://cultura.pontagrossa.pr.gov.br/agenda-cultural/'
       : 'https://cultura.pontagrossa.pr.gov.br/2025-2/';
 
     try {
-      // === PUPPETEER SCRAPING ===
-      const browser = await puppeteer.launch({
-        args: chromium.args,
-        defaultViewport: chromium.defaultViewport,
-        executablePath: await chromium.executablePath(),
-        headless: true,
-        timeout: 30000 // 30s
-      });
-      const page = await browser.newPage();
-      await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
-      const html = await page.content();
-      await browser.close();
+      const { data } = await axios.get(url, { timeout: 15000 });
+      const $ = cheerio.load(data);
+      const context = $('body').text().replace(/\s+/g, ' ').trim().substring(0, 50000);
 
-      // Remove scripts, estilos e limpa
-      const cleanText = html
-        .replace(/<script[\s\S]*?<\/script>/gi, '')
-        .replace(/<style[\s\S]*?<\/style>/gi, '')
-        .replace(/<[^>]*>/g, ' ')
-        .replace(/\s+/g, ' ')
-        .trim();
-
-      context = cleanText.substring(0, 60000); // Gemini aceita até 1M, mas limitamos
-      console.log('Contexto extraído (primeiros 500):', context.substring(0, 500));
-
-      // === GEMINI IA ===
-      const prompt = `Contexto do site oficial (extraído com Puppeteer):\n${context}\n\nPergunta do usuário: ${question}\n\nResponda em português, de forma clara, objetiva e amigável. Se não souber, diga: "Não encontrei informações sobre isso."`;
-      const result = await geminiModel.generateContent(prompt);
-      const aiResponse = result.response.text();
-
-      responseText = aiResponse + '\n\n1. Voltar ao menu\n2. Sair';
-      conversationStates[from].state = 'awaiting_help';
-    } catch (error) {
-      console.error('Erro Puppeteer/Gemini:', {
-        message: error.message,
-        stack: error.stack,
-        url,
-        question
-      });
-      responseText = 'Desculpe, ocorreu um erro ao processar sua dúvida. Tente novamente.\n\n1. Voltar ao menu\n2. Sair';
-      conversationStates[from].state = 'awaiting_help';
+      const result = await geminiModel.generateContent(
+        `Contexto do site oficial:\n${context}\n\nPergunta do usuário: ${message}\n\nResponda em português, de forma clara e objetiva. Se não souber, diga: "Não encontrei informações sobre isso."`
+      );
+      response = result.response.text() + '\n\n1. Voltar ao menu\n2. Sair';
+    } catch (err) {
+      console.error('Erro scraping/IA:', err.message);
+      response = 'Desculpe, não consegui acessar o site agora. Tente novamente.\n\n1. Voltar ao menu\n2. Sair';
     }
-  } else if (state === 'awaiting_help') {
-    const opt = text.trim();
-    if (opt === '1') {
+    conversationStates[from].state = 'awaiting_help';
+  }
+
+  else if (state === 'awaiting_help') {
+    if (message === '1') {
       conversationStates[from].state = 'menu_selection';
-      responseText = 'Sobre o que deseja falar?\n1. Agenda.\n2. Edital.\n3. Falar com atendente.\n4. Sair e encerrar o atendimento.';
-    } else if (opt === '2') {
+      response = 'Sobre o que deseja falar?\n1. Agenda.\n2. Edital.\n3. Falar com atendente.\n4. Sair.';
+    } else if (message === '2') {
       delete conversationStates[from];
-      responseText = 'Agradecemos seu contato.';
+      response = 'Atendimento encerrado.';
     } else {
-      responseText = 'Opção inválida. Digite:\n1. Voltar ao menu\n2. Sair';
+      response = 'Digite 1 ou 2.';
     }
   }
 
-  // Envio
-  if (responseText) {
+  // === ENVIO ===
+  if (response) {
     try {
       await axios.post(
         `https://graph.facebook.com/v24.0/${process.env.PHONE_NUMBER_ID}/messages`,
-        {
-          messaging_product: 'whatsapp',
-          to: from,
-          type: 'text',
-          text: { body: responseText }
-        },
-        {
-          headers: {
-            'Authorization': `Bearer ${process.env.ACCESS_TOKEN}`,
-            'Content-Type': 'application/json'
-          }
-        }
+        { messaging_product: 'whatsapp', to: from, text: { body: response } },
+        { headers: { Authorization: `Bearer ${process.env.ACCESS_TOKEN}` } }
       );
-      console.log(`Enviado para ${from}: ${responseText}`);
-    } catch (error) {
-      console.error('Erro envio:', error.response?.data || error.message);
+      console.log(`Enviado para ${from}: ${response.substring(0, 50)}...`);
+    } catch (err) {
+      console.error('Erro envio:', err.response?.data || err.message);
     }
   }
 
-  console.log(`Resposta gerada para ${from}: ${responseText}`);
   res.sendStatus(200);
 });
 
-app.listen(process.env.PORT || 10000, () => console.log('Servidor na porta', process.env.PORT || 10000));
+app.listen(process.env.PORT || 10000, () => console.log('Bot rodando na porta', process.env.PORT || 10000));

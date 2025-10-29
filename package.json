@@ -1,7 +1,7 @@
 {
   "name": "bot-whatsapp",
   "version": "1.0.0",
-  "description": "Bot WhatsApp com IA Gemini e scraping via Puppeteer",
+  "description": "Bot WhatsApp com IA Gemini e scraping via Axios + Cheerio",
   "main": "app.js",
   "scripts": {
     "start": "node app.js",
@@ -13,12 +13,10 @@
   "type": "commonjs",
   "dependencies": {
     "@google/generative-ai": "^0.24.1",
-    "@sparticuz/chromium": "^141.0.0",
     "axios": "^1.13.1",
+    "cheerio": "^1.1.2",
     "dotenv": "^17.2.3",
     "express": "^5.1.0",
-    "mongoose": "^8.19.2",
-    "puppeteer-core": "^24.27.0"
-  },
-  "repository": "https://raphaelfnds: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@github.com/raphaelfnds/bot-whatsapp.git"
+    "mongoose": "^8.19.2"
+  }
 }
