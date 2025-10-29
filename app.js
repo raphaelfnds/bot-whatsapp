@@ -7,7 +7,7 @@ const express = require('express');
 const mongoose = require('mongoose');
 const axios = require('axios');
 const { InferenceClient } = require('@huggingface/inference'); // Cliente recomendado
-const Firecrawl = require('@mendable/firecrawl-js');
+const { Firecrawl } = require('@mendable/firecrawl-js');
 const pdfParse = require('pdf-parse'); // ainda não usado, mas já importado
 
 const app = express();
@@ -20,7 +20,7 @@ mongoose.connect(process.env.MONGODB_URI)
 
 // Inicialização de clients para IA e scraping
 const hf = new InferenceClient({ token: process.env.HUGGINGFACE_TOKEN });
-const firecrawl = new Firecrawl.Firecrawl({ apiKey: process.env.FIRECRAWL_API_KEY });
+const firecrawl = new Firecrawl({ apiKey: process.env.FIRECRAWL_API_KEY });
 
 // Schema User
 const User = require('./models/User');
@@ -151,8 +151,8 @@ app.post('/webhook', async (req, res) => {
     try {
       // Scraping
       for (const url of urls) {
-        const scrape = await firecrawl.scrapeUrl(url, { formats: ['markdown'] });
-        context += scrape.markdown + ' ';
+        const scraped = await firecrawl.scrape({ url });
+        context += scraped.markdown + ' ';
       }
 
       // IA (Hugging Face)
