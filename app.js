@@ -151,7 +151,7 @@ app.post('/webhook', async (req, res) => {
     try {
       // Scraping
       for (const url of urls) {
-        const scraped = await firecrawl.scrape(url);
+        const scraped = await firecrawl.scrape({ url, timeout: 120000 })
         console.log('Scraped Markdown (primeiros 500 chars):', scraped.markdown.substring(0, 500));
         context += scraped.markdown + ' ';
       }
