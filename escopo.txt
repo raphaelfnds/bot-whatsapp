@@ -39,7 +39,7 @@ Testes manuais via Postman e WhatsApp OK, com salvamento de dados.
 
 Etapa 2-B: Mantida como está (pendente)
 
-Solicitação de dúvida, integração com IA (Hugging Face) e resposta com leitura dinâmica de sites/PDFs via Firecrawl e pdf-parse.
+Solicitação de dúvida, integração com IA (Hugging Face ou Gemini free + Axios + Cheerio) e resposta com leitura dinâmica de sites/PDFs via Firecrawl e pdf-parse ou outra forma mais eficiente se existir.
 
 Avaliação das ODS - Etapa 1
 

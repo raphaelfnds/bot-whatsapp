@@ -1,7 +1,7 @@
 {
   "name": "bot-whatsapp",
   "version": "1.0.0",
-  "description": "Bot WhatsApp com IA Gemini e scraping via Axios + Cheerio",
+  "description": "Bot WhatsApp com IA Hugging Face e scraping via Axios + Cheerio",
   "main": "app.js",
   "scripts": {
     "start": "node app.js",
@@ -12,11 +12,11 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
-    "@google/generative-ai": "^0.24.1",
     "axios": "^1.13.1",
     "cheerio": "^1.1.2",
     "dotenv": "^17.2.3",
     "express": "^5.1.0",
+    "groq-sdk": "^0.34.0",
     "mongoose": "^8.19.2"
   }
 }
