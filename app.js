@@ -165,11 +165,17 @@ app.post('/webhook', async (req, res) => {
       responseText += '\n\nPodemos ajudar em mais alguma coisa?\n1. Voltar ao menu\n2. Sair';
       conversationStates[from].state = 'awaiting_help';
     } catch (error) {
-      console.error('Erro na IA/Firecrawl:', error);
-      responseText = 'Desculpe, ocorreu um erro ao processar sua dúvida. Tente novamente.';
-      responseText += '\n\n1. Voltar ao menu\n2. Sair';
-      conversationStates[from].state = 'awaiting_help';
-    }
+    console.error('Erro na IA/Firecrawl (detalhes):', {
+      message: error.message,
+      stack: error.stack,
+      topic: conversationStates[from].topic,
+      urls: urls,
+      question: question
+    });
+    responseText = 'Desculpe, ocorreu um erro ao processar sua dúvida. Tente novamente.';
+    responseText += '\n\n1. Voltar ao menu\n2. Sair';
+    conversationStates[from].state = 'awaiting_help';
+  }
 
   // ---------- ESTADO PÓS‑RESPOSTA ----------
   } else if (state === 'awaiting_help') {
