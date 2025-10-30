@@ -226,7 +226,15 @@ app.post('/webhook', async (req, res) => {
 
       const $ = cheerio.load(data);
       $('script, style').remove(); // Remover tags irrelevantes para otimizar
-      let context = $('body').text().replace(/\s+/g, ' ').trim().substring(0, 8000); // Reduzido para 8000 chars
+
+      let context;
+      if (state === 'agenda_help') {
+        // Lógica replicada do código antigo para Agenda: contexto maior, sem filtro de relevantText
+        context = $('body').text().replace(/\s+/g, ' ').trim().substring(0, 50000);
+      } else {
+        // Manter lógica original para Edital
+        context = $('body').text().replace(/\s+/g, ' ').trim().substring(0, 8000); // Reduzido para 8000 chars
+      }
 
       if (pdfUrl) {
         try {
@@ -258,12 +266,16 @@ app.post('/webhook', async (req, res) => {
         }
       }
 
-      // Extrair trechos relevantes (busca %LIKE%)
-      const keywords = message.toLowerCase().split(' ').map(word => new RegExp(word, 'i'));
-      relevantText = context.split(' ').filter(word => keywords.some(regex => regex.test(word))).join(' ').substring(0, 1000);
+      if (state !== 'agenda_help') {
+        // Manter filtro para Edital
+        const keywords = message.toLowerCase().split(' ').map(word => new RegExp(word, 'i'));
+        relevantText = context.split(' ').filter(word => keywords.some(regex => regex.test(word))).join(' ').substring(0, 1000);
+      }
 
       context += pdfText ? `\n\nConteúdo extraído do PDF: ${pdfText}` : '';
-      context += relevantText ? `\n\nTrechos relevantes: ${relevantText}` : '';
+      if (state !== 'agenda_help') {
+        context += relevantText ? `\n\nTrechos relevantes: ${relevantText}` : '';
+      }
       console.log('[DEPURAÇÃO] Contexto gerado. Tamanho: ' + context.length);
 
       resetQuotaIfNeeded();
@@ -273,19 +285,28 @@ app.post('/webhook', async (req, res) => {
       } else {
         let aiResult = '';
         try {
+          let systemContent;
+          if (state === 'agenda_help') {
+            // Prompt replicado do código antigo para Agenda
+            systemContent = 'Você é um assistente da Secretaria de Cultura de Ponta Grossa. Responda em português, de forma clara e objetiva (máx 500 palavras). Use apenas o contexto abaixo. Se não souber, diga: "Não encontrei informações sobre isso."\n\nContexto: ' + context.substring(0, 30000);
+          } else {
+            // Manter prompt original para Edital
+            systemContent = 'Você é um assistente da Secretaria de Cultura de Ponta Grossa. Responda em português, claro e objetivo (máx 500 palavras). Use apenas o contexto. Considere termos aproximados, sinônimos e contextos semelhantes (busca fuzzy ou %LIKE%) para responder. Ex: "vagas" inclui "oportunidades" ou "posições". Se não souber, diga: "Não encontrei informações sobre isso."\n\nContexto: ' + context.substring(0, 20000);
+          }
+
           const completion = await groq.chat.completions.create({
             model: 'llama-3.1-8b-instant',
             messages: [
               {
                 role: 'system',
-                content: 'Você é um assistente da Secretaria de Cultura de Ponta Grossa. Responda em português, claro e objetivo (máx 150 palavras). Use apenas o contexto. Considere termos aproximados, sinônimos e contextos semelhantes (busca fuzzy ou %LIKE%) para responder. Ex: "vagas" inclui "oportunidades" ou "posições". Se não souber, diga: "Não encontrei informações sobre isso."\n\nContexto: ' + context.substring(0, 10000) // Reduzido total
+                content: systemContent
               },
               {
                 role: 'user',
                 content: message
               }
             ],
-            max_tokens: 200, // Aumentado para evitar cortes
+            max_tokens: (state === 'agenda_help' ? 1000 : 1000),
             temperature: 0.7
           });
 
