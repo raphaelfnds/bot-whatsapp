@@ -8,11 +8,24 @@ const mongoose = require('mongoose');
 const axios = require('axios');
 const cheerio = require('cheerio');
 const { Groq } = require('groq-sdk');
+const PDFParser = require('pdf2json');
 
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
 const app = express();
 app.use(express.json());
+
+// Função safe para decodeURIComponent
+function safeDecodeURI(str) {
+  // Substitui % inválidos por %25 para evitar malformed
+  str = str.replace(/%(?![0-9a-fA-F]{2})/g, '%25');
+  try {
+    return decodeURIComponent(str);
+  } catch (e) {
+    console.error('Falha ao decodificar:', str, e.message);
+    return str; // Retorna original se falhar
+  }
+}
 
 // ---------- MongoDB ----------
 mongoose.connect(process.env.MONGODB_URI)
@@ -20,6 +33,7 @@ mongoose.connect(process.env.MONGODB_URI)
   .catch(err => console.error('Erro MongoDB:', err));
 
 const User = require('./models/User');
+const Edital = require('./models/Edital');
 
 // ---------- Quota diária (em memória) ----------
 const DAILY_QUOTA = 200;
@@ -71,7 +85,7 @@ app.post('/webhook', async (req, res) => {
   let state = conversationStates[from]?.state || 'awaiting_name';
   const now = Date.now();
 
-  // timeout 30 min
+  // Timeout 30 min para reset completo, e TTL 5 min para inatividade em awaiting_help
   if (conversationStates[from] && now - conversationStates[from].lastMessageTime > 30 * 60 * 1000) {
     delete conversationStates[from];
     state = 'awaiting_name';
@@ -79,71 +93,110 @@ app.post('/webhook', async (req, res) => {
   if (!conversationStates[from]) conversationStates[from] = { lastMessageTime: now };
   conversationStates[from].lastMessageTime = now;
 
+  // TTL extra para awaiting_help: reset se >5min inativo
+  if (state === 'awaiting_help' && now - conversationStates[from].lastMessageTime > 5 * 60 * 1000) {
+    state = 'menu_selection';
+  }
+
   let response = '';
+
+  console.log(`[DEPURAÇÃO] Estado inicial: ${state}, De: ${from}, Mensagem: "${message}"`);
 
   // ==================== ESTADOS ====================
   if (state === 'awaiting_name') {
     const user = await User.findOne({ phone: from });
-    if (user) {
+    if (user && user.acceptedTerms) {
       conversationStates[from].state = 'menu_selection';
-      response = 'Sobre o que deseja falar?\n1. Agenda.\n2. Edital.\n3. Falar com atendente.\n4. Sair.';
+      conversationStates[from].proposedName = user.name;
+      conversationStates[from].lastMessageTime = now;
+      response = 'Sobre o que deseja falar?\n1. Agenda.\n2. Edital.\n3. Falar com atendente.\n4. Sair e encerrar o atendimento.';
     } else {
       if (!conversationStates[from].welcomed) {
         conversationStates[from].welcomed = true;
-        response = 'Bem-vindo! Por favor, *escreva seu nome*.';
+        conversationStates[from].lastMessageTime = now;
+        response = 'Bem vindo ao atendimento de IA!\nPor favor, *escreva qual seu nome*.';
       } else {
-        const name = message.normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-zA-Z ]/g, '');
-        const cleanName = name.split(' ').map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join(' ');
-        conversationStates[from].proposedName = cleanName || 'Usuário';
+        let cleanedName = message.trim().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-zA-Z]/g, '');
+        cleanedName = cleanedName.charAt(0).toUpperCase() + cleanedName.slice(1).toLowerCase();
+        conversationStates[from].proposedName = cleanedName || 'Usuario';
         conversationStates[from].state = 'confirming_name';
-        response = `Seu nome é *${cleanName}*?\n\n1. SIM\n2. NÃO\n3. SAIR\n\n*Ao digitar "1" você aceita nossa política de privacidade.*`;
+        conversationStates[from].lastMessageTime = now;
+        response = `O nome que você escreveu é ${cleanedName}, correto?\n\nDigite:\n1. Para SIM.\n2. Para NAO.\n3. Para SAIR.\nObservação: Ao digitar "1. Para SIM" também estará aceitando a politica de privacidade: https://github.com/raphaelfnds/bot-whatsapp-privacidade/tree/main?tab=readme-ov-file#pol%C3%ADtica-de-privacidade---bot-whatsapp.`;
       }
     }
   } else if (state === 'confirming_name') {
-    if (message === '1') {
-      await User.create({ phone: from, name: conversationStates[from].proposedName });
+    const option = message.trim();
+    if (option === '1') {
+      await User.create({ phone: from, name: conversationStates[from].proposedName, acceptedTerms: true });
       conversationStates[from].state = 'menu_selection';
-      response = 'Sobre o que deseja falar?\n1. Agenda.\n2. Edital.\n3. Falar com atendente.\n4. Sair.';
-    } else if (message === '2') {
+      conversationStates[from].lastMessageTime = now;
+      response = 'Sobre o que deseja falar?\n1. Agenda.\n2. Edital.\n3. Falar com atendente.\n4. Sair e encerrar o atendimento.';
+    } else if (option === '2') {
       conversationStates[from].state = 'awaiting_name';
       delete conversationStates[from].proposedName;
-      response = 'Por favor, escreva seu nome novamente.';
-    } else if (message === '3') {
+      conversationStates[from].lastMessageTime = now;
+      response = 'Por favor, escreva qual seu nome.';
+    } else if (option === '3') {
       delete conversationStates[from];
-      response = 'Atendimento encerrado.';
+      response = 'Agradecemos seu contato.';
     } else {
-      response = 'Resposta inválida. Digite 1, 2 ou 3.';
+      response = `Não entendi sua resposta.\nO nome que você escreveu é ${conversationStates[from].proposedName}, correto?\n\nDigite:\n1. Para SIM.\n2. Para NAO.\n3. Para SAIR.\nObservação: Ao digitar "1. Para SIM" também estará aceitando a politica de privacidade: https://github.com/raphaelfnds/bot-whatsapp-privacidade/tree/main?tab=readme-ov-file#pol%C3%ADtica-de-privacidade---bot-whatsapp.`;
     }
   } else if (state === 'menu_selection') {
-    if (message === '1') {
-      conversationStates[from].topic = 'agenda';
-      conversationStates[from].state = 'awaiting_question';
-      response = 'Qual sua dúvida sobre a *agenda cultural*?';
-    } else if (message === '2') {
-      conversationStates[from].topic = 'edital';
-      conversationStates[from].state = 'awaiting_question';
-      response = 'Qual sua dúvida sobre o *edital*?';
-    } else if (message === '3') {
-      response = 'Redirecionando: https://wa.me/554288768668';
-    } else if (message === '4') {
+    const option = message.trim();
+    if (option === '1') {
+      conversationStates[from].state = 'agenda_help';
+      conversationStates[from].lastMessageTime = now;
+      response = 'Qual sua dúvida sobre a agenda?\n\nVocê também pode acessar mais detalhes através do link: https://cultura.pontagrossa.pr.gov.br/agenda-cultural/';
+    } else if (option === '2') {
+      const editais = await Edital.find();
+      let editaisList = 'Editais disponíveis:\n';
+      editais.forEach((edital, index) => {
+        editaisList += `${index + 1}. ${edital.nome}\nLink: ${edital.link_principal}\n\n`;
+      });
+      conversationStates[from].state = 'edital_selection';
+      conversationStates[from].lastMessageTime = now;
+      response = editaisList + 'Digite o número do edital para mais detalhes.';
+    } else if (option === '3') {
       delete conversationStates[from];
-      response = 'Obrigado!';
+      response = 'Por favor, clique no link para ser redirecionado: https://wa.me/554288768668';
+    } else if (option === '4') {
+      delete conversationStates[from];
+      response = 'Agradecemos seu contato.';
     } else {
-      response = 'Opção inválida. Escolha 1 a 4.';
+      response = 'Opção inválida.\nSobre o que deseja falar?\n1. Agenda.\n2. Edital.\n3. Falar com atendente.\n4. Sair e encerrar o atendimento.';
     }
-  } else if (state === 'awaiting_question') {
-    const url = conversationStates[from].topic === 'agenda'
-      ? 'https://cultura.pontagrossa.pr.gov.br/agenda-cultural/'
-      : 'https://cultura.pontagrossa.pr.gov.br/2025-2/';
+  } else if (state === 'edital_selection') {
+    const editais = await Edital.find();
+    const index = parseInt(message.trim()) - 1;
+    if (index >= 0 && index < editais.length) {
+      const selectedEdital = editais[index];
+      conversationStates[from].selectedEdital = selectedEdital;
+      conversationStates[from].state = 'edital_help';
+      conversationStates[from].lastMessageTime = now;
+      response = `Edital selecionado: ${selectedEdital.nome}\nLink PDF: ${selectedEdital.link_pdf || 'Não disponível'}\n\nQual sua dúvida sobre este edital?`;
+    } else {
+      response = 'Número inválido. Tente novamente ou digite 4 para sair.';
+    }
+  } else if (state === 'agenda_help' || state === 'edital_help') {
+    conversationStates[from].state = 'awaiting_help';
+    conversationStates[from].lastMessageTime = now;
 
-    let data;
     try {
-      // ---- CACHE + RETRY SCRAPING ----
+      let url, pdfUrl = '';
+      if (state === 'agenda_help') {
+        url = 'https://cultura.pontagrossa.pr.gov.br/agenda-cultural/';
+      } else {
+        url = conversationStates[from].selectedEdital.link_principal;
+        pdfUrl = conversationStates[from].selectedEdital.link_pdf || '';
+      }
+
+      let data, pdfText = '', relevantText = '';
       const cacheKey = url;
       const cached = scrapeCache.get(cacheKey);
+
       if (cached && Date.now() - cached.timestamp < SCRAPE_CACHE_TTL) {
         data = cached.html;
-        console.log('Cache hit para:', url);
       } else {
         let attempts = 0;
         const maxAttempts = 3;
@@ -160,10 +213,11 @@ app.post('/webhook', async (req, res) => {
             });
             data = resp.data;
             scrapeCache.set(cacheKey, { html: data, timestamp: Date.now() });
+            console.log('[DEPURAÇÃO] Scraping bem-sucedido na tentativa ' + (attempts + 1));
             break;
           } catch (err) {
             attempts++;
-            console.error(`Tentativa ${attempts}/${maxAttempts} falhou para ${url}:`, err.code || err.message);
+            console.error(`[DEPURAÇÃO] Tentativa ${attempts}/${maxAttempts} falhou para ${url}:`, err.code || err.message);
             if (attempts >= maxAttempts) throw err;
             await new Promise(r => setTimeout(r, 2000 * attempts));
           }
@@ -171,34 +225,77 @@ app.post('/webhook', async (req, res) => {
       }
 
       const $ = cheerio.load(data);
-      const context = $('body').text().replace(/\s+/g, ' ').trim().substring(0, 50000);
+      $('script, style').remove(); // Remover tags irrelevantes para otimizar
+      let context = $('body').text().replace(/\s+/g, ' ').trim().substring(0, 8000); // Reduzido para 8000 chars
 
-      // ---- QUOTA DIÁRIA ----
+      if (pdfUrl) {
+        try {
+          const pdfBuffer = (await axios.get(pdfUrl, { responseType: 'arraybuffer' })).data;
+          const pdfParser = new PDFParser();
+          pdfText = await new Promise((resolve, reject) => {
+            pdfParser.on('pdfParser_dataError', err => reject(err));
+            pdfParser.on('pdfParser_dataReady', (pdfData) => {
+              let text = '';
+              try {
+                pdfData.Pages.forEach(page => {
+                  page.Texts.forEach(textItem => {
+                    if (textItem.R && textItem.R[0] && textItem.R[0].T) {
+                      let decoded = safeDecodeURI(textItem.R[0].T);
+                      text += decoded.replace(/[^\x00-\x7F]/g, '') + ' '; // Sanitização
+                    }
+                  });
+                });
+                resolve(text.trim().substring(0, 2000)); // Reduzido para 2000 chars
+              } catch (e) {
+                reject(e);
+              }
+            });
+            pdfParser.parseBuffer(pdfBuffer);
+          });
+        } catch (err) {
+          console.error('PDF extração falhou:', err.message);
+          pdfText = ''; // Fallback para scraping puro
+        }
+      }
+
+      // Extrair trechos relevantes (busca %LIKE%)
+      const keywords = message.toLowerCase().split(' ').map(word => new RegExp(word, 'i'));
+      relevantText = context.split(' ').filter(word => keywords.some(regex => regex.test(word))).join(' ').substring(0, 1000);
+
+      context += pdfText ? `\n\nConteúdo extraído do PDF: ${pdfText}` : '';
+      context += relevantText ? `\n\nTrechos relevantes: ${relevantText}` : '';
+      console.log('[DEPURAÇÃO] Contexto gerado. Tamanho: ' + context.length);
+
       resetQuotaIfNeeded();
+      console.log('[DEPURAÇÃO] Chamadas diárias atuais: ' + dailyCalls);
       if (dailyCalls >= DAILY_QUOTA) {
         response = 'Limite diário de consultas à IA atingido. Acesse diretamente o site.\n\n1. Voltar ao menu\n2. Sair';
       } else {
-        // ---- GROQ CALL (Llama3-8B - 100% gratuito, 2025) ----
         let aiResult = '';
-
         try {
           const completion = await groq.chat.completions.create({
             model: 'llama-3.1-8b-instant',
             messages: [
               {
                 role: 'system',
-                content: 'Você é um assistente da Secretaria de Cultura de Ponta Grossa. Responda em português, de forma clara e objetiva (máx 200 palavras). Use apenas o contexto abaixo. Se não souber, diga: "Não encontrei informações sobre isso."\n\nContexto: ' + context.substring(0, 30000)
+                content: 'Você é um assistente da Secretaria de Cultura de Ponta Grossa. Responda em português, claro e objetivo (máx 150 palavras). Use apenas o contexto. Considere termos aproximados, sinônimos e contextos semelhantes (busca fuzzy ou %LIKE%) para responder. Ex: "vagas" inclui "oportunidades" ou "posições". Se não souber, diga: "Não encontrei informações sobre isso."\n\nContexto: ' + context.substring(0, 10000) // Reduzido total
               },
               {
                 role: 'user',
                 content: message
               }
             ],
-            max_tokens: 150,
+            max_tokens: 200, // Aumentado para evitar cortes
             temperature: 0.7
           });
 
-          aiResult = completion.choices[0].message.content.trim();
+          if (completion.choices && completion.choices[0] && completion.choices[0].message.content) {
+            aiResult = completion.choices[0].message.content.trim();
+            console.log('[DEPURAÇÃO] Resultado da IA gerado. Tamanho: ' + aiResult.length);
+          } else {
+            console.log('[DEPURAÇÃO] Choices da IA vazio ou inválido.');
+            aiResult = 'Não encontrei informações sobre isso.';
+          }
 
           dailyCalls++;
           response = aiResult + '\n\n1. Voltar ao menu\n2. Sair';
@@ -208,23 +305,28 @@ app.post('/webhook', async (req, res) => {
           response = 'Desculpe, não consegui processar sua dúvida agora. Tente novamente.\n\n1. Voltar ao menu\n2. Sair';
         }
       }
-
-      conversationStates[from].state = 'awaiting_help';
     } catch (err) {
       console.error('Erro scraping/IA:', err.message);
       response = 'Desculpe, não consegui acessar o site agora. Tente novamente.\n\n1. Voltar ao menu\n2. Sair';
-      conversationStates[from].state = 'awaiting_help';
     }
   } else if (state === 'awaiting_help') {
-    if (message === '1') {
+    const option = message.trim();
+    if (option === '1') {
       conversationStates[from].state = 'menu_selection';
-      response = 'Sobre o que deseja falar?\n1. Agenda.\n2. Edital.\n3. Falar com atendente.\n4. Sair.';
-    } else if (message === '2') {
+      response = 'Sobre o que deseja falar?\n1. Agenda.\n2. Edital.\n3. Falar com atendente.\n4. Sair e encerrar o atendimento.';
+    } else if (option === '2') {
       delete conversationStates[from];
-      response = 'Atendimento encerrado.';
+      response = 'Agradecemos seu contato.';
     } else {
-      response = 'Digite 1 ou 2.';
+      // Validação para evitar "vácuo": reset se inválido
+      conversationStates[from].state = 'menu_selection';
+      response = 'Opção inválida. Voltando ao menu.\nSobre o que deseja falar?\n1. Agenda.\n2. Edital.\n3. Falar com atendente.\n4. Sair e encerrar o atendimento.';
     }
+  }
+
+  if (!response) {
+    console.log('[DEPURAÇÃO] Resposta não gerada; definindo fallback.');
+    response = 'Desculpe, erro interno. Tente novamente.\n\n1. Voltar ao menu\n2. Sair';
   }
 
   // ==================== ENVIO ====================
@@ -239,9 +341,11 @@ app.post('/webhook', async (req, res) => {
     } catch (err) {
       console.error('Erro envio:', err.response?.data || err.message);
     }
+  } else {
+    console.log('[DEPURAÇÃO] Nenhuma resposta gerada; possível vácuo no fluxo.');
   }
 
   res.sendStatus(200);
 });
 
-app.listen(process.env.PORT || 4000, () => console.log('Bot rodando na porta', process.env.PORT || 4000));
+app.listen(process.env.PORT || 1000, () => console.log('Bot rodando na porta', process.env.PORT || 1000));
