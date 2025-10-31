@@ -13,7 +13,7 @@ module.exports = {
         const selectedEdital = editais[index];
         states[from].selectedEdital = selectedEdital;
         newState = 'edital_help';
-        response = `Edital selecionado: ${selectedEdital.nome}\nLink PDF: ${selectedEdital.link_pdf || 'Não disponível'}\n\nQual sua dúvida sobre este edital?`;
+        response = `Edital selecionado: ${selectedEdital.nome}\nLink PDF: ${selectedEdital.link_pdf || 'Não disponível'}\n\nEm poucas palavras escreva qual sua dúvida sobre este edital?`;
       } else {
         response = 'Opção Inválida! Por favor digite apenas o número relacionado ao edital que deseja saber mais.';
       }
@@ -26,7 +26,27 @@ module.exports = {
 
         if (pdfUrl) {
           try {
-            const pdfBuffer = (await axios.get(pdfUrl, { responseType: 'arraybuffer' })).data;
+            let attempts = 0;
+            const maxAttempts = 3;
+            let pdfBuffer;
+            while (attempts < maxAttempts) {
+              try {
+                const resp = await axios.get(pdfUrl, {
+                  responseType: 'arraybuffer',
+                  timeout: 30000,
+                  headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36' }
+                });
+                pdfBuffer = resp.data;
+                console.log('[DEPURAÇÃO PDF] Download bem-sucedido na tentativa ' + (attempts + 1));
+                break;
+              } catch (err) {
+                attempts++;
+                console.error(`[DEPURAÇÃO PDF] Tentativa ${attempts}/${maxAttempts} falhou para ${pdfUrl}:`, err.code || err.message);
+                if (attempts >= maxAttempts) throw err;
+                await new Promise(r => setTimeout(r, 2000 * attempts));
+              }
+            }
+
             const pdfParser = new PDFParser();
             pdfText = await new Promise((resolve, reject) => {
               pdfParser.on('pdfParser_dataError', err => reject(err));
@@ -42,7 +62,7 @@ module.exports = {
                     });
                   });
                   let normalizedText = text.trim().split(' ').filter(word => word.trim()).join(' ').replace(/(\b\w\s+)+/g, match => match.replace(/\s+/g, '') + ' ');
-                  resolve(normalizedText.substring(0, 13000));
+                  resolve(normalizedText.substring(0, 18000));
                 } catch (e) {
                   reject(e);
                 }
@@ -70,8 +90,14 @@ module.exports = {
         } else {
           let aiResult = '';
           try {
-            const systemContent = 'Você é um assistente da Secretaria de Cultura de Ponta Grossa. Responda em português, claro e objetivo (máx 500 palavras). Use apenas o contexto. Considere termos aproximados, sinônimos e contextos semelhantes (busca fuzzy ou %LIKE%) para responder. Ex: "vagas" inclui "oportunidades" ou "posições". Se não souber, diga: "Não encontrei informações sobre isso."\n\nContexto: ' + context.substring(0, 20000);
-            console.log('[DEPURAÇÃO SYSTEM CONTENT] Conteúdo completo enviado para IA:', systemContent);
+            let systemContent = 'Você é um assistente da Secretaria de Cultura de Ponta Grossa. Responda em português, claro e objetivo (máx 500 palavras). Use apenas o contexto. Considere termos aproximados, sinônimos e contextos semelhantes (busca fuzzy ou %LIKE%) para responder. Ex: "vagas" inclui "oportunidades" ou "posições". Se não souber, diga: "Não encontrei informações sobre isso."\n\nContexto: ' + context.substring(0, 14000);
+            const approxTokens = Math.ceil(systemContent.length / 4) + systemContent.split(/\s+/).length;
+            console.log('[DEPURAÇÃO] Tokens aproximados: ' + approxTokens);
+            if (approxTokens > 5000) {
+              systemContent = systemContent.substring(0, Math.floor(5000 * 4));
+              console.log('[DEPURAÇÃO] Contexto truncado para evitar limite: ' + systemContent.length);
+            }
+            console.log('[DEPURAÇÃO SYSTEM CONTENT] Conteúdo completo enviado para IA:', systemContent.substring(0, 200) + '...');
 
             const completion = await groq.chat.completions.create({
               model: 'llama-3.1-8b-instant',
@@ -98,7 +124,7 @@ module.exports = {
         }
       } catch (err) {
         console.error('Erro PDF/IA:', err.message);
-        response = 'Desculpe, não consegui acessar o PDF agora. Tente novamente.\n\n1. Voltar ao menu\n2. Sair';
+        response = 'Desculpe, não consegui acessar o PDF agora devido a um timeout. Tente novamente mais tarde.\n\n1. Voltar ao menu\n2. Sair';
       }
     }
 

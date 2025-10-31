@@ -48,7 +48,7 @@ module.exports = {
       } else {
         let aiResult = '';
         try {
-          const systemContent = 'Você é um assistente da Secretaria de Cultura de Ponta Grossa. Responda em português, de forma clara e objetiva (máx 500 palavras). Use apenas o contexto abaixo. Se não souber, diga: "Não encontrei informações sobre isso."\n\nContexto: ' + context.substring(0, 30000);
+          const systemContent = 'Você é um assistente da Secretaria de Cultura de Ponta Grossa. Responda em português, de forma clara e objetiva (máx 500 palavras). Use apenas o contexto abaixo e se houver menção ao ano da agenda apenas informe baseado ao que você ve no contexto pois certamente os dados serão do ano atual sempre. Se não souber, diga: "Não encontrei informações sobre isso."\n\nContexto: ' + context.substring(0, 30000);
 
           const completion = await groq.chat.completions.create({
             model: 'llama-3.1-8b-instant',
