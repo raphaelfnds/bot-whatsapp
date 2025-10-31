@@ -1,6 +1,6 @@
 module.exports = {
   async handle(from, message, states, deps) {
-    const { axios, cheerio, groq, PDFParser, safeDecodeURI, scrapeCache, SCRAPE_CACHE_TTL, resetQuotaIfNeeded, dailyCalls, DAILY_QUOTA, Edital } = deps;
+    const { axios, groq, PDFParser, safeDecodeURI, resetQuotaIfNeeded, dailyCalls, DAILY_QUOTA, Edital } = deps;
     const state = states[from].state;
     let response = '';
     let newState = state;
@@ -20,38 +20,8 @@ module.exports = {
     } else if (state === 'edital_help') {
       newState = 'awaiting_help';
       try {
-        const url = states[from].selectedEdital.link_principal;
         const pdfUrl = states[from].selectedEdital.link_pdf || '';
-        let data, pdfText = '', relevantText = '';
-        const cacheKey = url;
-        const cached = scrapeCache.get(cacheKey);
-
-        if (cached && Date.now() - cached.timestamp < SCRAPE_CACHE_TTL) {
-          data = cached.html;
-        } else {
-          let attempts = 0;
-          const maxAttempts = 3;
-          while (attempts < maxAttempts) {
-            try {
-              const resp = await axios.get(url, {
-                timeout: 30000,
-                headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36', 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8', 'Accept-Language': 'pt-BR,pt;q=0.9', 'Connection': 'keep-alive' }
-              });
-              data = resp.data;
-              scrapeCache.set(cacheKey, { html: data, timestamp: Date.now() });
-              console.log('[DEPURAÇÃO] Scraping bem-sucedido na tentativa ' + (attempts + 1));
-              break;
-            } catch (err) {
-              attempts++;
-              console.error(`[DEPURAÇÃO] Tentativa ${attempts}/${maxAttempts} falhou para ${url}:`, err.code || err.message);
-              if (attempts >= maxAttempts) throw err;
-              await new Promise(r => setTimeout(r, 2000 * attempts));
-            }
-          }
-        }
-
-        const $ = cheerio.load(data);
-        $('script, style').remove();
+        let pdfText = '', relevantText = '';
         let context = '';
 
         if (pdfUrl) {
@@ -96,7 +66,7 @@ module.exports = {
         resetQuotaIfNeeded();
         console.log('[DEPURAÇÃO] Chamadas diárias atuais: ' + dailyCalls);
         if (dailyCalls >= DAILY_QUOTA) {
-          response = 'Limite diário de consultas à IA atingido. Acesse diretamente o site.\n\n1. Voltar ao menu\n2. Sair';
+          response = 'Limite diário de consultas à IA atingido. Acesse diretamente o edital.\n\n1. Voltar ao menu\n2. Sair';
         } else {
           let aiResult = '';
           try {
@@ -127,8 +97,8 @@ module.exports = {
           }
         }
       } catch (err) {
-        console.error('Erro scraping/IA:', err.message);
-        response = 'Desculpe, não consegui acessar o site agora. Tente novamente.\n\n1. Voltar ao menu\n2. Sair';
+        console.error('Erro PDF/IA:', err.message);
+        response = 'Desculpe, não consegui acessar o PDF agora. Tente novamente.\n\n1. Voltar ao menu\n2. Sair';
       }
     }
 
