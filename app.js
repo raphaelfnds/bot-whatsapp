@@ -4,12 +4,6 @@ if (process.env.NODE_ENV !== 'production') {
 
 const express = require('express');
 const mongoose = require('mongoose');
-
-// ---------- MongoDB ----------
-mongoose.connect(process.env.MONGODB_URI)
-  .then(() => console.log('MongoDB conectado'))
-  .catch(err => console.error('Erro MongoDB:', err));
-
 const axios = require('axios');
 const cheerio = require('cheerio');
 const { Groq } = require('groq-sdk');
@@ -63,8 +57,28 @@ const editalHandler = require('./handlers/editalHandler');
 const attendantHandler = require('./handlers/attendantHandler');
 const awaitingHelpHandler = require('./handlers/awaitingHelpHandler');
 
+// ---------- Conexão MongoDB reutilizável ----------
+let conn = null;
+const connectDB = async () => {
+  if (conn == null) {
+    try {
+      conn = await mongoose.connect(process.env.MONGODB_URI, {
+        serverSelectionTimeoutMS: 5000,
+        retryWrites: true,
+        w: 'majority'
+      });
+      console.log('MongoDB conectado');
+    } catch (err) {
+      console.error('Erro MongoDB:', err);
+      throw err; // Propaga erro para depuração
+    }
+  }
+  return conn;
+};
+
 // ---------- Webhook GET ----------
-app.get('/webhook', (req, res) => {
+app.get('/webhook', async (req, res) => {
+  await connectDB(); // Garante conexão para GET
   if (req.query['hub.mode'] === 'subscribe' && req.query['hub.verify_token'] === 'meuTokenSecreto2025') {
     res.send(req.query['hub.challenge']);
   } else {
@@ -74,6 +88,7 @@ app.get('/webhook', (req, res) => {
 
 // ---------- Webhook POST ----------
 app.post('/webhook', async (req, res) => {
+  await connectDB(); // Garante conexão para POST
   const body = req.body;
   if (!body?.entry?.[0]?.changes?.[0]?.value) return res.sendStatus(200);
 
@@ -172,11 +187,15 @@ app.post('/webhook', async (req, res) => {
 // Para Lambda: wrap o app (sem listen)
 const serverlessExpress = require('aws-serverless-express');
 const server = serverlessExpress.createServer(app);
-module.exports.handler = (event, context) => {
-  serverlessExpress.proxy(server, event, context, 'PROMISE').promise;
+module.exports.handler = async (event, context) => {
+  context.callbackWaitsForEmptyEventLoop = false;
+  await connectDB();
+  return serverlessExpress.proxy(server, event, context, 'PROMISE').promise;
 };
 
 // Para testes locais/ngrok (não roda em Lambda)
 if (require.main === module) {
-  app.listen(process.env.PORT || 1000, () => console.log('Bot rodando na porta', process.env.PORT || 1000));
-}
+  connectDB().then(() => {
+    app.listen(process.env.PORT || 1000, () => console.log('Bot rodando na porta', process.env.PORT || 1000));
+  });
+};
