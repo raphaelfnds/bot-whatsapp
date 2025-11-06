@@ -184,7 +184,18 @@ app.post('/webhook', async (req, res) => {
   res.sendStatus(200);
 });
 
-// Para testes no Render ou local
-connectDB().then(() => {
-  app.listen(process.env.PORT || 1000, () => console.log('Bot rodando na porta', process.env.PORT || 1000));
-});
+// Para Lambda: wrap o app (sem listen)
+const serverlessExpress = require('aws-serverless-express');
+const server = serverlessExpress.createServer(app);
+module.exports.handler = async (event, context) => {
+  context.callbackWaitsForEmptyEventLoop = false;
+  await connectDB();
+  return serverlessExpress.proxy(server, event, context, 'PROMISE').promise;
+};
+
+// Para testes locais/ngrok (não roda em Lambda)
+if (require.main === module) {
+  connectDB().then(() => {
+    app.listen(process.env.PORT || 1000, () => console.log('Bot rodando na porta', process.env.PORT || 1000));
+  });
+};
