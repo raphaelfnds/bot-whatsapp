@@ -4,6 +4,12 @@ if (process.env.NODE_ENV !== 'production') {
 
 const express = require('express');
 const mongoose = require('mongoose');
+
+// ---------- MongoDB ----------
+mongoose.connect(process.env.MONGODB_URI)
+  .then(() => console.log('MongoDB conectado'))
+  .catch(err => console.error('Erro MongoDB:', err));
+
 const axios = require('axios');
 const cheerio = require('cheerio');
 const { Groq } = require('groq-sdk');
@@ -24,11 +30,6 @@ function safeDecodeURI(str) {
     return str;
   }
 }
-
-// ---------- MongoDB ----------
-mongoose.connect(process.env.MONGODB_URI)
-  .then(() => console.log('MongoDB conectado'))
-  .catch(err => console.error('Erro MongoDB:', err));
 
 const User = require('./models/User');
 const Edital = require('./models/Edital');
@@ -168,4 +169,14 @@ app.post('/webhook', async (req, res) => {
   res.sendStatus(200);
 });
 
-app.listen(process.env.PORT || 1000, () => console.log('Bot rodando na porta', process.env.PORT || 1000));
+// Para Lambda: wrap o app (sem listen)
+const serverlessExpress = require('aws-serverless-express');
+const server = serverlessExpress.createServer(app);
+module.exports.handler = (event, context) => {
+  serverlessExpress.proxy(server, event, context, 'PROMISE').promise;
+};
+
+// Para testes locais/ngrok (não roda em Lambda)
+if (require.main === module) {
+  app.listen(process.env.PORT || 1000, () => console.log('Bot rodando na porta', process.env.PORT || 1000));
+}
